@@ -46,7 +46,7 @@ class BubblePipeline:
         self.calibrator = ScoreCalibrator(n_bins=self.config.n_score_bins)
         self.calibrator.fit(pos_scores, neg_scores, prior)
 
-    def predict(self, image: np.ndarray) -> dict:
+    def predict(self, image: np.ndarray) -> dict[str, list[float]]:
         """
         Estimate bubble size histogram for a single image.
 
