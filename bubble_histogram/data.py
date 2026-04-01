@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import NamedTuple
 from dataclasses import dataclass
 
+__all__ = ["Bubble", "parse_annotations", "load_image", "get_session_id", "AnnotatedSample", "AnnotatedDataset"]
+
 from PIL import Image
 
 
