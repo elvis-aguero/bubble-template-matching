@@ -39,3 +39,14 @@ def test_pipeline_save_load(trained_pipeline, synthetic_image, tmp_path):
     result_orig = trained_pipeline.predict(synthetic_image)
     result_load = loaded.predict(synthetic_image)
     np.testing.assert_allclose(result_orig["expected_count"], result_load["expected_count"])
+
+
+from bubble_histogram.histogram import plot_histogram
+import matplotlib
+matplotlib.use("Agg")  # non-interactive backend for tests
+
+
+def test_plot_histogram_runs(trained_pipeline, synthetic_image):
+    result = trained_pipeline.predict(synthetic_image)
+    ax = plot_histogram(result)
+    assert ax is not None
