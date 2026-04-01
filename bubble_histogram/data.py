@@ -67,6 +67,8 @@ class AnnotatedSample:
 
 
 class AnnotatedDataset:
+    """Dataset with leave-one-session-out train/val split support."""
+
     def __init__(self, root_dir: Path, val_session: str | None = None):
         self.root_dir = Path(root_dir)
         self.image_dir = self.root_dir / "images"
