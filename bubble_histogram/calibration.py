@@ -36,9 +36,9 @@ def sample_scores(
             level_idx = int(np.argmin(np.abs(eff_radii - r)))
             eff_r, score_map = ncc_results[level_idx]
 
-            # Convert bubble center to scaled coordinates
-            # effective_radius = (template_size/2) / scale_factor^l
-            # scale_factor^l = (template_size/2) / effective_radius
+            # Convert bubble center to scaled coordinates.
+            # At pyramid level l: effective_radius = (template_size/2) / scale_factor^l,
+            # so the downscale factor = (template_size/2) / effective_radius.
             img_scale = (config.template_size / 2) / eff_r
             sx = int(round(cx * img_scale))
             sy = int(round(cy * img_scale))
