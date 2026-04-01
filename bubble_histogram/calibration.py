@@ -9,6 +9,7 @@ def sample_scores(
     dataset: AnnotatedDataset,
     templates: np.ndarray,
     config: PipelineConfig,
+    image_paths: list | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Extract NCC scores at annotated bubble centers (positives) and random
@@ -17,11 +18,12 @@ def sample_scores(
     Each bubble is sampled at the pyramid level whose effective radius best
     matches the annotated bubble radius.
     """
+    paths = image_paths if image_paths is not None else dataset.train_images
     pos_scores: list[float] = []
     neg_scores: list[float] = []
     rng = np.random.default_rng(seed=42)
 
-    for image_path in dataset.train_images:
+    for image_path in paths:
         sample = dataset.load_sample(image_path)
         ncc_results = compute_ncc_maps(sample.image, templates, config)
 

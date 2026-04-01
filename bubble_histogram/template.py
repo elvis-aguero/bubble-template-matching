@@ -6,7 +6,11 @@ from bubble_histogram.config import PipelineConfig
 from bubble_histogram.data import AnnotatedDataset
 
 
-def build_templates(dataset: AnnotatedDataset, config: PipelineConfig) -> np.ndarray:
+def build_templates(
+    dataset: AnnotatedDataset,
+    config: PipelineConfig,
+    image_paths: list | None = None,
+) -> np.ndarray:
     """
     Build appearance templates from annotated training bubbles.
 
@@ -15,6 +19,8 @@ def build_templates(dataset: AnnotatedDataset, config: PipelineConfig) -> np.nda
     np.ndarray of shape (n_bins, template_size, template_size)
         Each template is L2-normalized. n_bins <= num_templates (empty bins are skipped).
     """
+    paths = image_paths if image_paths is not None else dataset.train_images
+
     bin_edges = np.logspace(
         math.log10(config.min_radius),
         math.log10(config.max_radius),
@@ -23,7 +29,7 @@ def build_templates(dataset: AnnotatedDataset, config: PipelineConfig) -> np.nda
 
     bin_patches: list[list[np.ndarray]] = [[] for _ in range(config.num_templates)]
 
-    for image_path in dataset.train_images:
+    for image_path in paths:
         sample = dataset.load_sample(image_path)
         img = sample.image
         h, w = img.shape

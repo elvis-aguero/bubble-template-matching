@@ -128,3 +128,50 @@ def test_dataset_load_sample(tmp_dataset):
     assert sample.image.dtype == np.float32
     assert len(sample.bubbles) == 1
     assert sample.bubbles[0].radius == pytest.approx(5.0)
+
+
+def test_three_way_split_disjoint(tmp_path):
+    """template, calibration, and test sets must be disjoint."""
+    from PIL import Image as PILImage
+    images_dir = tmp_path / "images"
+    labels_dir = tmp_path / "labels"
+    images_dir.mkdir(); labels_dir.mkdir()
+    # Create 10 synthetic images so the split has something to work with
+    import json
+    for i in range(10):
+        name = f"ZeroG_Test_C1S{i:04d}_img001"
+        arr = np.zeros((20, 20), dtype=np.uint8)
+        PILImage.fromarray(arr, mode="L").save(images_dir / f"{name}.png")
+        ann = {"version": "3.3.5", "flags": {}, "shapes": [], "imagePath": f"{name}.png",
+               "imageWidth": 20, "imageHeight": 20, "description": ""}
+        (labels_dir / f"{name}.json").write_text(json.dumps(ann))
+
+    ds = AnnotatedDataset(tmp_path, template_frac=0.30, calibration_frac=0.65)
+    tmpl = set(ds.template_images)
+    cal  = set(ds.calibration_images)
+    test = set(ds.test_images)
+    assert tmpl & cal == set()
+    assert tmpl & test == set()
+    assert cal  & test == set()
+    assert tmpl | cal | test == set(sorted((tmp_path / "images").glob("*.png")))
+
+
+def test_three_way_split_fractions(tmp_path):
+    """Counts should be roughly proportional to requested fractions."""
+    from PIL import Image as PILImage
+    import json
+    images_dir = tmp_path / "images"
+    labels_dir = tmp_path / "labels"
+    images_dir.mkdir(); labels_dir.mkdir()
+    for i in range(20):
+        name = f"ZeroG_Test_C1S{i:04d}_img001"
+        arr = np.zeros((20, 20), dtype=np.uint8)
+        PILImage.fromarray(arr, mode="L").save(images_dir / f"{name}.png")
+        ann = {"version": "3.3.5", "flags": {}, "shapes": [], "imagePath": f"{name}.png",
+               "imageWidth": 20, "imageHeight": 20, "description": ""}
+        (labels_dir / f"{name}.json").write_text(json.dumps(ann))
+
+    ds = AnnotatedDataset(tmp_path, template_frac=0.30, calibration_frac=0.65)
+    assert len(ds.template_images) >= 4   # ~30% of 20
+    assert len(ds.calibration_images) >= 9  # ~65% of 20
+    assert len(ds.test_images) >= 1

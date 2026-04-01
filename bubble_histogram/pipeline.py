@@ -29,9 +29,11 @@ class BubblePipeline:
         self.calibrator: ScoreCalibrator | None = None
 
     def train(self, dataset: AnnotatedDataset) -> None:
-        self.templates = build_templates(dataset, self.config)
+        self.templates = build_templates(dataset, self.config,
+                                         image_paths=dataset.template_images)
 
-        pos_scores, neg_scores = sample_scores(dataset, self.templates, self.config)
+        pos_scores, neg_scores = sample_scores(dataset, self.templates, self.config,
+                                               image_paths=dataset.calibration_images)
 
         # Estimate prior P(bubble) = total bubbles / total pixel locations
         total_bubbles = 0
@@ -71,17 +73,70 @@ class BubblePipeline:
 
         return {"radius_px": radius_px, "expected_count": expected_counts}
 
-    def save(self, path: Path) -> None:
+    def save(
+        self,
+        path: Path,
+        ncc_images: list[np.ndarray] | None = None,
+        ncc_names: list[str] | None = None,
+    ) -> None:
         path = Path(path)
         with open(path, "wb") as f:
-            pickle.dump(
-                {
-                    "config": self.config,
-                    "templates": self.templates,
-                    "calibrator": self.calibrator,
-                },
-                f,
-            )
+            pickle.dump({"config": self.config, "templates": self.templates,
+                         "calibrator": self.calibrator}, f)
+
+        # Always save templates PNG
+        self._save_templates_png(path.with_name(path.stem + "_templates.png"))
+
+        # Optionally save NCC score maps
+        if ncc_images:
+            names = ncc_names or [f"sample_{i}" for i in range(len(ncc_images))]
+            for img, name in zip(ncc_images, names):
+                out = path.with_name(f"{path.stem}_ncc_{name}.png")
+                self._save_ncc_png(out, img)
+
+    def _save_templates_png(self, path: Path) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        templates = self.templates
+        n = len(templates)
+        fig, axes = plt.subplots(1, n, figsize=(4 * n, 4))
+        if n == 1:
+            axes = [axes]
+        for i, (ax, T) in enumerate(zip(axes, templates)):
+            ax.imshow(T, cmap="gray")
+            ax.set_title(f"Template {i}")
+            ax.axis("off")
+        fig.suptitle("Learned templates (dark = low intensity = bubble)")
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    def _save_ncc_png(self, path: Path, image: np.ndarray) -> None:
+        """Save original image alongside NCC score map at the most populated scale level."""
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        ncc_results = compute_ncc_maps(image, self.templates, self.config)
+        if not ncc_results:
+            return
+
+        # Pick the level with the highest total score magnitude (most signal)
+        best_idx = int(np.argmax([np.abs(sm).sum() for _, sm in ncc_results]))
+        eff_radius, score_map = ncc_results[best_idx]
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        ax1.imshow(image, cmap="gray")
+        ax1.set_title("Original")
+        ax1.axis("off")
+        im = ax2.imshow(score_map, cmap="hot", vmin=-1, vmax=1)
+        ax2.set_title(f"NCC score map  (eff. radius \u2248 {eff_radius:.1f} px)")
+        ax2.axis("off")
+        fig.colorbar(im, ax=ax2, fraction=0.046, pad=0.04)
+        fig.tight_layout()
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
 
     @classmethod
     def load(cls, path: Path) -> "BubblePipeline":
