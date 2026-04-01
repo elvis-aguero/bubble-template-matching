@@ -45,10 +45,7 @@ def load_image(path: Path) -> np.ndarray:
     elif raw.dtype == np.uint16 or raw.dtype == np.int32:
         return raw.astype(np.float32) / 65535.0
     else:
-        arr = raw.astype(np.float32)
-        if arr.max() > 0:
-            arr /= arr.max()
-        return arr
+        raise ValueError(f"Unsupported image dtype {raw.dtype}. Expected uint8 or uint16.")
 
 
 def get_session_id(filename: str) -> str:

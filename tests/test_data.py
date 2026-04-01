@@ -91,7 +91,7 @@ def test_load_8bit_image(tmp_path):
 
 def test_load_16bit_image(tmp_path):
     arr = np.array([[0, 32768], [65535, 16384]], dtype=np.uint16)
-    Image.fromarray(arr, mode="I;16").save(tmp_path / "img.png")
+    Image.fromarray(arr).save(tmp_path / "img.png")
     result = load_image(tmp_path / "img.png")
     assert result.dtype == np.float32
     assert result.max() == pytest.approx(1.0, abs=1e-4)
