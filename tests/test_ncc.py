@@ -22,7 +22,7 @@ def test_pyramid_shapes_shrink():
         assert shapes[i][0] <= shapes[i - 1][0]
 
 
-def test_pyramid_effective_radii_decrease():
+def test_pyramid_effective_radii_increase():
     cfg = PipelineConfig(template_size=10, scale_factor=0.9, min_radius=1.0, max_radius=50.0)
     img = np.random.rand(200, 200).astype(np.float32)
     levels = build_pyramid(img, cfg)

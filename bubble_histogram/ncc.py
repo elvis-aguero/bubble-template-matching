@@ -24,18 +24,18 @@ def build_pyramid(image: np.ndarray, config: PipelineConfig) -> list[tuple]:
     )
 
     levels = []
-    for l in range(n_levels):
-        scale = config.scale_factor ** l
+    for lvl in range(n_levels):
+        scale = config.scale_factor ** lvl
         effective_radius = (config.template_size / 2) / scale
         if effective_radius > config.max_radius:
             break
 
-        if scale == 1.0:
+        if lvl == 0:
             scaled = image
         else:
             scaled = rescale(image, scale, anti_aliasing=True, channel_axis=None).astype(np.float32)
 
-        levels.append((l, scaled, effective_radius))
+        levels.append((lvl, scaled, effective_radius))
 
     return levels
 
@@ -64,10 +64,15 @@ def compute_ncc_maps(
     List of (effective_radius_px, score_map) pairs.
     """
     n_bins = len(templates)
+    # Bin centers are computed from config.num_templates (the intended number of bins),
+    # not len(templates). If build_templates skipped empty bins, len(templates) <
+    # num_templates and the bin centers would be misaligned. Using num_templates ensures
+    # the centers match the radius ranges used during template construction.
+    # Note: with num_templates=1 (the default), this distinction is irrelevant.
     bin_edges = np.logspace(
         math.log10(config.min_radius),
         math.log10(config.max_radius),
-        n_bins + 1,
+        config.num_templates + 1,
     )
     bin_centers = np.sqrt(bin_edges[:-1] * bin_edges[1:])
 
