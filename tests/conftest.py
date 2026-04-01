@@ -1,7 +1,6 @@
 import json
 import numpy as np
 import pytest
-from pathlib import Path
 
 
 def make_dark_circle_image(size=100, cx=50, cy=50, r=5):
