@@ -3,7 +3,7 @@ from pathlib import Path
 
 import numpy as np
 
-from bubble_histogram.calibration import ScoreCalibrator, sample_scores
+from bubble_histogram.calibration import ScoreCalibrator, count_local_maxima, sample_scores
 from bubble_histogram.config import PipelineConfig
 from bubble_histogram.data import AnnotatedDataset
 from bubble_histogram.ncc import compute_ncc_maps
@@ -27,21 +27,31 @@ class BubblePipeline:
         self.config = config
         self.templates: np.ndarray | None = None
         self.calibrator: ScoreCalibrator | None = None
+        self._split_info: dict | None = None
+        self._pos_scores: np.ndarray | None = None
+        self._neg_scores: np.ndarray | None = None
 
     def train(self, dataset: AnnotatedDataset) -> None:
+        self._split_info = getattr(dataset, "split_info", None)
         self.templates = build_templates(dataset, self.config,
                                          image_paths=dataset.template_images)
 
         pos_scores, neg_scores = sample_scores(dataset, self.templates, self.config,
                                                image_paths=dataset.calibration_images)
+        self._pos_scores = pos_scores
+        self._neg_scores = neg_scores
 
-        # Estimate prior P(bubble) = total bubbles / total pixel locations
+        # Estimate prior from calibration images
         total_bubbles = 0
         total_locs = 0
-        for p in dataset.train_images:
+        for p in dataset.calibration_images:
             sample = dataset.load_sample(p)
             total_bubbles += len(sample.bubbles)
-            total_locs += int(np.prod(sample.image.shape))
+            if self.config.local_maxima_calibration:
+                ncc_r = compute_ncc_maps(sample.image, self.templates, self.config)
+                total_locs += count_local_maxima(ncc_r, self.config)
+            else:
+                total_locs += int(np.prod(sample.image.shape))
 
         prior = total_bubbles / max(total_locs, 1)
 
@@ -66,8 +76,18 @@ class BubblePipeline:
         radius_px = []
         expected_counts = []
 
+        from skimage.feature import peak_local_max
+        min_d = max(1, self.config.template_size // 2)
+
+        use_lm = self.config.predict_local_maxima or self.config.local_maxima_calibration
         for eff_radius, score_map in ncc_results:
-            probs = self.calibrator.predict(score_map.ravel())
+            if use_lm:
+                peaks = peak_local_max(score_map, min_distance=min_d,
+                                       exclude_border=False)
+                scores = score_map[peaks[:, 0], peaks[:, 1]] if len(peaks) else np.array([])
+            else:
+                scores = score_map.ravel()
+            probs = self.calibrator.predict(scores) if len(scores) else np.array([])
             expected_counts.append(float(probs.sum()))
             radius_px.append(eff_radius)
 
@@ -86,6 +106,18 @@ class BubblePipeline:
 
         # Always save templates PNG
         self._save_templates_png(path.with_name(path.stem + "_templates.png"))
+
+        # Always save split manifest
+        if self._split_info is not None:
+            import json
+            split_path = path.with_name(path.stem + "_split.json")
+            split_path.write_text(json.dumps(self._split_info, indent=2))
+
+        # Always save score histograms if available
+        if self._pos_scores is not None and self._neg_scores is not None:
+            self._save_score_histograms_png(
+                path.with_name(path.stem + "_score_histograms.png")
+            )
 
         # Optionally save NCC score maps
         if ncc_images:
@@ -111,6 +143,30 @@ class BubblePipeline:
         fig.suptitle("Learned templates (dark = low intensity = bubble)")
         fig.savefig(path, dpi=150, bbox_inches="tight")
         plt.close(fig)
+
+    def _save_score_histograms_png(self, path: Path) -> None:
+        """Save overlapping histograms of positive and negative NCC scores."""
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        bins = np.linspace(-1.0, 1.0, self.config.n_score_bins + 1)
+        ax.hist(self._pos_scores, bins=bins, density=True, alpha=0.6,
+                color="steelblue", label=f"Bubble ({len(self._pos_scores)} samples)")
+        ax.hist(self._neg_scores, bins=bins, density=True, alpha=0.6,
+                color="salmon", label=f"Non-bubble ({len(self._neg_scores)} samples)")
+        ax.set_xlabel("NCC score")
+        ax.set_ylabel("Density")
+        ax.set_title("NCC score distributions (calibration set)")
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    def save_ncc_png(self, path: Path, image: np.ndarray) -> None:
+        """Public wrapper — save NCC score map for a given image."""
+        self._save_ncc_png(path, image)
 
     def _save_ncc_png(self, path: Path, image: np.ndarray) -> None:
         """Save original image alongside NCC score map at the most populated scale level."""

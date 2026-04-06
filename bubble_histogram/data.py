@@ -85,6 +85,13 @@ class AnnotatedDataset:
             self.template_images    = train
             self.calibration_images = train
             self.test_images        = val
+            self.split_info = {
+                "mode": "loso",
+                "val_session": val_session,
+                "template":    [p.name for p in train],
+                "calibration": [p.name for p in train],
+                "test":        [p.name for p in val],
+            }
 
         elif template_frac is not None and calibration_frac is not None:
             # Image-level three-way split
@@ -103,6 +110,15 @@ class AnnotatedDataset:
             self.calibration_images = [all_images[i] for i in cal_idx]
             self.train_images       = self.template_images + self.calibration_images
             self.val_images         = self.test_images
+            self.split_info = {
+                "mode":             "image_level",
+                "seed":             seed,
+                "template_frac":    template_frac,
+                "calibration_frac": calibration_frac,
+                "template":         [p.name for p in self.template_images],
+                "calibration":      [p.name for p in self.calibration_images],
+                "test":             [p.name for p in self.test_images],
+            }
 
         else:
             # No split — backward compat
@@ -111,6 +127,7 @@ class AnnotatedDataset:
             self.template_images    = list(all_images)
             self.calibration_images = list(all_images)
             self.test_images        = []
+            self.split_info         = {"mode": "none"}
 
     def load_sample(self, image_path: Path) -> AnnotatedSample:
         label_path = self.label_dir / (image_path.stem + ".json")

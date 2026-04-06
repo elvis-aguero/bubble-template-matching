@@ -1,8 +1,13 @@
 import numpy as np
+from skimage.feature import peak_local_max
 
 from bubble_histogram.config import PipelineConfig
 from bubble_histogram.data import AnnotatedDataset
 from bubble_histogram.ncc import compute_ncc_maps
+
+
+def _lm_min_dist(config: PipelineConfig) -> int:
+    return max(1, config.template_size // 2)
 
 
 def sample_scores(
@@ -12,16 +17,25 @@ def sample_scores(
     image_paths: list | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Extract NCC scores at annotated bubble centers (positives) and random
-    non-bubble locations (negatives) from all training images.
+    Extract NCC scores at annotated bubble centers (positives) and
+    non-bubble locations (negatives).
 
-    Each bubble is sampled at the pyramid level whose effective radius best
-    matches the annotated bubble radius.
+    When config.local_maxima_calibration is False (default):
+      - Positives: score at the exact bubble-centre pixel at the matching level
+      - Negatives: random non-bubble pixels at level 0
+
+    When config.local_maxima_calibration is True:
+      - Positives: score at the local maximum nearest to the bubble centre
+        (within template_size/2 px) at the matching level
+      - Negatives: all local maxima at level 0 that are outside the
+        per-bubble exclusion zone
     """
     paths = image_paths if image_paths is not None else dataset.train_images
     pos_scores: list[float] = []
     neg_scores: list[float] = []
     rng = np.random.default_rng(seed=42)
+    lm_mode = config.local_maxima_calibration
+    min_d = _lm_min_dist(config)
 
     for image_path in paths:
         sample = dataset.load_sample(image_path)
@@ -32,45 +46,79 @@ def sample_scores(
 
         eff_radii = np.array([r for r, _ in ncc_results])
 
+        # Pre-compute peaks once per level (only needed in lm_mode)
+        level_peaks: dict[int, np.ndarray] = {}
+        if lm_mode:
+            for li, (_, sm) in enumerate(ncc_results):
+                level_peaks[li] = peak_local_max(sm, min_distance=min_d,
+                                                  exclude_border=False)
+
         for bubble in sample.bubbles:
             cx, cy, r = bubble.cx, bubble.cy, bubble.radius
-            # Pick level whose effective radius is closest to bubble radius
             level_idx = int(np.argmin(np.abs(eff_radii - r)))
             eff_r, score_map = ncc_results[level_idx]
 
-            # Convert bubble center to scaled coordinates.
-            # At pyramid level l: effective_radius = (template_size/2) / scale_factor^l,
-            # so the downscale factor = (template_size/2) / effective_radius.
             img_scale = (config.template_size / 2) / eff_r
             sx = int(round(cx * img_scale))
             sy = int(round(cy * img_scale))
-
             h, w = score_map.shape
-            if 0 <= sx < w and 0 <= sy < h:
+
+            if not (0 <= sx < w and 0 <= sy < h):
+                continue
+
+            if lm_mode:
+                peaks = level_peaks[level_idx]
+                if len(peaks) == 0:
+                    continue
+                dists = np.linalg.norm(peaks - np.array([[sy, sx]]), axis=1)
+                nearest_idx = int(np.argmin(dists))
+                if dists[nearest_idx] <= min_d:
+                    py, px = peaks[nearest_idx]
+                    pos_scores.append(float(score_map[py, px]))
+            else:
                 pos_scores.append(float(score_map[sy, sx]))
 
-        # Sample negatives from the first (full-res) level
-        _, score_map = ncc_results[0]
-        h, w = score_map.shape
-
-        # Build exclusion mask around all bubbles (at level-0 scale)
+        # Build exclusion mask (level-0 scale)
+        _, score_map_0 = ncc_results[0]
+        h0, w0 = score_map_0.shape
         img_scale_0 = (config.template_size / 2) / eff_radii[0]
-        excl = np.zeros((h, w), dtype=bool)
-        d = config.min_neg_dist
+        excl = np.zeros((h0, w0), dtype=bool)
         for bubble in sample.bubbles:
-            sx = int(round(bubble.cx * img_scale_0))
-            sy = int(round(bubble.cy * img_scale_0))
-            excl[max(0, sy - d):min(h, sy + d), max(0, sx - d):min(w, sx + d)] = True
+            sx0 = int(round(bubble.cx * img_scale_0))
+            sy0 = int(round(bubble.cy * img_scale_0))
+            d = max(config.min_neg_dist, int(np.ceil(bubble.radius * img_scale_0)))
+            excl[max(0, sy0 - d):min(h0, sy0 + d),
+                 max(0, sx0 - d):min(w0, sx0 + d)] = True
 
-        candidates = np.argwhere(~excl)
-        n_neg = min(len(pos_scores) * config.neg_sample_ratio, len(candidates))
-        if n_neg > 0:
-            chosen = rng.choice(len(candidates), size=n_neg, replace=False)
-            for idx in chosen:
-                y, x = candidates[idx]
-                neg_scores.append(float(score_map[y, x]))
+        if lm_mode:
+            # Negatives: local maxima outside the exclusion zone at level 0
+            peaks_0 = peak_local_max(score_map_0, min_distance=min_d,
+                                     exclude_border=False)
+            for py, px in peaks_0:
+                if not excl[py, px]:
+                    neg_scores.append(float(score_map_0[py, px]))
+        else:
+            candidates = np.argwhere(~excl)
+            n_neg = min(len(pos_scores) * config.neg_sample_ratio, len(candidates))
+            if n_neg > 0:
+                chosen = rng.choice(len(candidates), size=n_neg, replace=False)
+                for idx in chosen:
+                    y, x = candidates[idx]
+                    neg_scores.append(float(score_map_0[y, x]))
 
     return np.array(pos_scores, dtype=np.float32), np.array(neg_scores, dtype=np.float32)
+
+
+def count_local_maxima(
+    ncc_results: list[tuple[float, np.ndarray]],
+    config: PipelineConfig,
+) -> int:
+    """Count total spatial local maxima across all pyramid levels."""
+    min_d = _lm_min_dist(config)
+    return sum(
+        len(peak_local_max(sm, min_distance=min_d, exclude_border=False))
+        for _, sm in ncc_results
+    )
 
 
 class ScoreCalibrator:

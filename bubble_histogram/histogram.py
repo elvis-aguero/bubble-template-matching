@@ -10,6 +10,7 @@ def plot_histogram(
     ax: matplotlib.axes.Axes | None = None,
     title: str = "Bubble Size Histogram",
     color: str = "steelblue",
+    empirical_counts: np.ndarray | None = None,
 ) -> matplotlib.axes.Axes:
     """
     Plot a per-frame bubble size histogram.
@@ -19,6 +20,8 @@ def plot_histogram(
     result : output of BubblePipeline.predict() —
              dict with "radius_px" and "expected_count"
     ax : existing Axes to draw on (creates new figure if None)
+    empirical_counts : optional array of annotated bubble counts per radius bin,
+                       same length as result["radius_px"], overlaid as a step histogram
     """
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 4))
@@ -30,13 +33,22 @@ def plot_histogram(
     log_radii = np.log10(radii)
     bar_width = log_radii[1] - log_radii[0] if len(log_radii) > 1 else 0.05
 
-    ax.bar(log_radii, counts, width=bar_width * 0.9, align="center", color=color, alpha=0.8)
+    ax.bar(log_radii, counts, width=bar_width * 0.9, align="center",
+           color=color, alpha=0.7, label="Predicted (expected count)")
+
+    if empirical_counts is not None:
+        empirical_counts = np.asarray(empirical_counts)
+        # Draw as a step histogram using bar with hatch so it overlays cleanly
+        ax.bar(log_radii, empirical_counts, width=bar_width * 0.9, align="center",
+               color="none", edgecolor="tomato", linewidth=1.5,
+               hatch="//", alpha=0.9, label="Annotated (ground truth)")
+        ax.legend(fontsize=8)
 
     tick_vals = [1, 2, 5, 10, 20, 50]
     ax.set_xticks(np.log10(tick_vals))
     ax.set_xticklabels([str(v) for v in tick_vals])
     ax.set_xlabel("Bubble radius (px)")
-    ax.set_ylabel("Expected count")
+    ax.set_ylabel("Count")
     ax.set_title(title)
     ax.set_xlim(log_radii.min() - bar_width, log_radii.max() + bar_width)
 
