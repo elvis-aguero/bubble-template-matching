@@ -29,21 +29,23 @@ def plot_histogram(
     radii = np.array(result["radius_px"])
     counts = np.array(result["expected_count"])
 
-    # Bar width in log10 space = log10(1/scale_factor) — one pyramid step
+    # plot on a log10(radius) axis so equal-width bars correspond to equal multiplicative size ranges
+    # (matching the log-spaced pyramid levels); x-ticks are then converted back to pixel values
     log_radii = np.log10(radii)
-    bar_width = log_radii[1] - log_radii[0] if len(log_radii) > 1 else 0.05
+    bar_width = log_radii[1] - log_radii[0] if len(log_radii) > 1 else 0.05  # one pyramid step in log10 space
 
     ax.bar(log_radii, counts, width=bar_width * 0.9, align="center",
            color=color, alpha=0.7, label="Predicted (expected count)")
 
     if empirical_counts is not None:
         empirical_counts = np.asarray(empirical_counts)
-        # Draw as a step histogram using bar with hatch so it overlays cleanly
+        # overlay ground-truth counts as a hatched outline so both bars are visible simultaneously
         ax.bar(log_radii, empirical_counts, width=bar_width * 0.9, align="center",
                color="none", edgecolor="tomato", linewidth=1.5,
                hatch="//", alpha=0.9, label="Annotated (ground truth)")
         ax.legend(fontsize=8)
 
+    # convert log10 x-axis back to human-readable pixel values for the tick labels
     tick_vals = [1, 2, 5, 10, 20, 50]
     ax.set_xticks(np.log10(tick_vals))
     ax.set_xticklabels([str(v) for v in tick_vals])
@@ -59,6 +61,6 @@ def aggregate_histograms(results: list[dict]) -> dict:
     """Sum expected counts across multiple frames."""
     if not results:
         return {"radius_px": [], "expected_count": []}
-    radius_px = results[0]["radius_px"]
-    total = np.sum([np.array(r["expected_count"]) for r in results], axis=0)
+    radius_px = results[0]["radius_px"]     # all frames share the same radius bins (same pipeline)
+    total = np.sum([np.array(r["expected_count"]) for r in results], axis=0)   # element-wise sum across frames
     return {"radius_px": radius_px, "expected_count": total.tolist()}

@@ -21,13 +21,15 @@ def build_templates(
     """
     paths = image_paths if image_paths is not None else dataset.train_images
 
+    # bin_edges divides [min_radius, max_radius] into num_templates logarithmically equal intervals
+    # log spacing is used because bubble size variation is multiplicative, not additive
     bin_edges = np.logspace(
         math.log10(config.min_radius),
         math.log10(config.max_radius),
         config.num_templates + 1,
     )
 
-    bin_patches: list[list[np.ndarray]] = [[] for _ in range(config.num_templates)]
+    bin_patches: list[list[np.ndarray]] = [[] for _ in range(config.num_templates)]  # collect patches per size bin
 
     for image_path in paths:
         sample = dataset.load_sample(image_path)
@@ -38,28 +40,34 @@ def build_templates(
             cx, cy, r = bubble.cx, bubble.cy, bubble.radius
 
             if config.num_templates == 1:
-                bin_idx = 0
+                bin_idx = 0  # all bubbles go into one template regardless of size
             else:
-                bin_idx = int(np.searchsorted(bin_edges[1:], r))
-                bin_idx = min(bin_idx, config.num_templates - 1)
+                bin_idx = int(np.searchsorted(bin_edges[1:], r))        # find which size bin this bubble belongs to
+                bin_idx = min(bin_idx, config.num_templates - 1)         # clamp to last bin if radius > max_radius
 
-            r_int = max(1, int(round(r)))
-            x0, x1 = int(cx) - r_int, int(cx) + r_int
-            y0, y1 = int(cy) - r_int, int(cy) + r_int
+            # context_factor > 1.0 makes the crop larger than the bubble bounding box,
+            # including a ring of background that makes the template more discriminative
+            r_crop = max(1, int(round(r * config.template_context_factor)))
+            x0, x1 = int(cx) - r_crop, int(cx) + r_crop
+            y0, y1 = int(cy) - r_crop, int(cy) + r_crop
 
             if x0 < 0 or y0 < 0 or x1 > w or y1 > h or x1 <= x0 or y1 <= y0:
-                continue
+                continue    # skip bubbles too close to the image border to crop cleanly
 
             patch = img[y0:y1, x0:x1]
             if patch.size == 0:
                 continue
 
+            # resize every patch to the same template_size × template_size shape
+            # so that patches from different-sized bubbles can be averaged together
             resized = sk_resize(
                 patch,
                 (config.template_size, config.template_size),
-                anti_aliasing=True,
+                anti_aliasing=True,     # anti_aliasing prevents aliasing artifacts when downscaling large bubbles
             ).astype(np.float32)
 
+            # normalise each patch to sum=1 before averaging so that bright and dark images
+            # contribute equally regardless of their absolute intensity level
             s = resized.sum()
             if s > 0:
                 resized /= s
@@ -69,14 +77,14 @@ def build_templates(
     templates = []
     for patches in bin_patches:
         if not patches:
-            continue
-        T = np.mean(patches, axis=0)
+            continue                        # skip bins with no annotated bubbles
+        T = np.mean(patches, axis=0)        # average all patches in this bin → mean appearance
         norm = np.linalg.norm(T)
         if norm > 0:
-            T /= norm
+            T /= norm                       # L2-normalise so dot(T, W/||W||) = cos(angle) in NCC
         templates.append(T)
 
     if not templates:
         raise ValueError("No valid patches found for any size bin.")
 
-    return np.stack(templates)
+    return np.stack(templates)  # shape: (n_non_empty_bins, template_size, template_size)

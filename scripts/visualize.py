@@ -1,5 +1,31 @@
 #!/usr/bin/env python3
-"""Visualize template, calibration curves, and per-frame histogram."""
+"""
+Visualize a trained bubble histogram pipeline: template, calibration curve, and size histogram.
+
+USAGE
+-----
+  python scripts/visualize.py <pipeline.pkl> [--image <frame.png>] [--output-dir <dir>]
+
+OUTPUT (saved to --output-dir, default: plots/)
+------
+  templates.png    — the averaged bubble appearance template(s); should show a dark disc
+                     surrounded by a brighter background ring. A flat grey blob means
+                     the averaging cancelled out (too much size variation or bad training data).
+  calibration.png  — P(bubble|NCC score) vs score; should rise steeply for scores > 0.3
+                     and be near zero for negative scores.
+  histogram.png    — predicted bubble size histogram for --image (only if --image is given)
+
+QUICK START
+-----------
+  # Inspect a trained pipeline (no image needed for template + calibration plots)
+  python scripts/visualize.py output/pipeline.pkl
+
+  # Also plot the size histogram for a specific frame
+  python scripts/visualize.py output/pipeline.pkl --image seed_v04/images/some_frame.png
+
+  # Save to a custom directory
+  python scripts/visualize.py output/pipeline.pkl --image frame.png --output-dir my_plots/
+"""
 import argparse
 from pathlib import Path
 
@@ -12,10 +38,16 @@ from bubble_histogram.data import load_image
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Visualize pipeline components.")
+    parser = argparse.ArgumentParser(
+        description="Visualize pipeline template, calibration curve, and size histogram.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
     parser.add_argument("pipeline", type=Path, help="Path to saved pipeline (.pkl)")
-    parser.add_argument("--image", type=Path, default=None, help="Image to run and plot histogram for")
-    parser.add_argument("--output-dir", type=Path, default=Path("plots"))
+    parser.add_argument("--image", type=Path, default=None,
+                        help="Image to predict on and plot the size histogram for")
+    parser.add_argument("--output-dir", type=Path, default=Path("plots"),
+                        help="Directory to write PNGs into (default: plots/)")
     args = parser.parse_args()
 
     pipeline = BubblePipeline.load(args.pipeline)

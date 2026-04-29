@@ -25,35 +25,39 @@ class BubblePipeline:
 
     def __init__(self, config: PipelineConfig):
         self.config = config
-        self.templates: np.ndarray | None = None
-        self.calibrator: ScoreCalibrator | None = None
-        self._split_info: dict | None = None
-        self._pos_scores: np.ndarray | None = None
+        self.templates: np.ndarray | None = None        # shape (n_bins, template_size, template_size)
+        self.calibrator: ScoreCalibrator | None = None  # maps NCC score → P(bubble)
+        self._split_info: dict | None = None            # saved for the *_split.json artifact
+        self._pos_scores: np.ndarray | None = None      # saved for the *_score_histograms.png artifact
         self._neg_scores: np.ndarray | None = None
 
     def train(self, dataset: AnnotatedDataset) -> None:
         self._split_info = getattr(dataset, "split_info", None)
+        # build templates from the template split only (not calibration images — avoids data leakage)
         self.templates = build_templates(dataset, self.config,
                                          image_paths=dataset.template_images)
 
+        # sample NCC scores from the calibration split (separate from template images)
         pos_scores, neg_scores = sample_scores(dataset, self.templates, self.config,
                                                image_paths=dataset.calibration_images)
         self._pos_scores = pos_scores
         self._neg_scores = neg_scores
 
-        # Estimate prior from calibration images
+        # estimate the prior: fraction of pixel locations that contain a bubble centre
+        # this is used as P(bubble) in Bayes' rule: P(bubble|score) ∝ P(score|bubble) * prior
         total_bubbles = 0
         total_locs = 0
         for p in dataset.calibration_images:
             sample = dataset.load_sample(p)
             total_bubbles += len(sample.bubbles)
             if self.config.local_maxima_calibration:
+                # if calibrator was trained on LM scores, the prior denominator should also be n_local_maxima
                 ncc_r = compute_ncc_maps(sample.image, self.templates, self.config)
                 total_locs += count_local_maxima(ncc_r, self.config)
             else:
-                total_locs += int(np.prod(sample.image.shape))
+                total_locs += int(np.prod(sample.image.shape))  # default: prior = n_bubbles / n_pixels
 
-        prior = total_bubbles / max(total_locs, 1)
+        prior = total_bubbles / max(total_locs, 1)  # guard against division by zero
 
         self.calibrator = ScoreCalibrator(n_bins=self.config.n_score_bins)
         self.calibrator.fit(pos_scores, neg_scores, prior)
@@ -77,8 +81,10 @@ class BubblePipeline:
         expected_counts = []
 
         from skimage.feature import peak_local_max
-        min_d = max(1, self.config.template_size // 2)
+        min_d = 2   # minimum pixel distance between local maxima; small because NCC response is smooth
 
+        # use_lm: if True, sum P(bubble) only at local maxima instead of every pixel
+        # summing over all pixels overcounts by ~100× because each bubble creates a broad halo
         use_lm = self.config.predict_local_maxima or self.config.local_maxima_calibration
         for eff_radius, score_map in ncc_results:
             if use_lm:
@@ -86,9 +92,9 @@ class BubblePipeline:
                                        exclude_border=False)
                 scores = score_map[peaks[:, 0], peaks[:, 1]] if len(peaks) else np.array([])
             else:
-                scores = score_map.ravel()
+                scores = score_map.ravel()  # dense: every pixel contributes (not recommended)
             probs = self.calibrator.predict(scores) if len(scores) else np.array([])
-            expected_counts.append(float(probs.sum()))
+            expected_counts.append(float(probs.sum()))  # expected count = sum of P(bubble) over candidates
             radius_px.append(eff_radius)
 
         return {"radius_px": radius_px, "expected_count": expected_counts}
@@ -101,6 +107,7 @@ class BubblePipeline:
     ) -> None:
         path = Path(path)
         with open(path, "wb") as f:
+            # only the three objects needed to run predict() are pickled; diagnostic data is separate
             pickle.dump({"config": self.config, "templates": self.templates,
                          "calibrator": self.calibrator}, f)
 
@@ -128,7 +135,7 @@ class BubblePipeline:
 
     def _save_templates_png(self, path: Path) -> None:
         import matplotlib
-        matplotlib.use("Agg")
+        matplotlib.use("Agg")   # non-interactive backend — safe to call without a display
         import matplotlib.pyplot as plt
 
         templates = self.templates
@@ -152,6 +159,7 @@ class BubblePipeline:
 
         fig, ax = plt.subplots(figsize=(8, 4))
         bins = np.linspace(-1.0, 1.0, self.config.n_score_bins + 1)
+        # good calibration: blue (bubble) distribution peaks at high scores, red (background) peaks near 0
         ax.hist(self._pos_scores, bins=bins, density=True, alpha=0.6,
                 color="steelblue", label=f"Bubble ({len(self._pos_scores)} samples)")
         ax.hist(self._neg_scores, bins=bins, density=True, alpha=0.6,
@@ -160,6 +168,59 @@ class BubblePipeline:
         ax.set_ylabel("Density")
         ax.set_title("NCC score distributions (calibration set)")
         ax.legend()
+        fig.tight_layout()
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    def save_top_matches_png(
+        self,
+        path: Path,
+        image: np.ndarray,
+        top_n: int = 100,
+    ) -> None:
+        """
+        Save original image annotated with the top-N highest-scoring peaks
+        after 3D NMS across scale levels.
+
+        Each box is 2×eff_radius wide/tall in original image pixels (= the template
+        footprint at that scale). Colour encodes NCC score (plasma, warm = high).
+        """
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        from bubble_histogram.calibration import nms_3d
+
+        ncc_results = compute_ncc_maps(image, self.templates, self.config)
+        if not ncc_results:
+            return
+
+        all_peaks = nms_3d(ncc_results, self.config)    # 3D NMS: suppresses cross-scale duplicates
+        peaks = all_peaks[:top_n]                       # keep only the top-N highest-scoring survivors
+        if not peaks:
+            return
+
+        fig, ax = plt.subplots(figsize=(12, 8))
+        ax.imshow(image, cmap="gray")
+        cmap = plt.cm.plasma    # warm colours = high NCC score
+        scores = [p[0] for p in peaks]
+        s_min, s_max = min(scores), max(scores)
+
+        for score, level, y_orig, x_orig in peaks:
+            eff_radius = ncc_results[level][0]  # box size = template footprint at this scale level
+            colour = cmap((score - s_min) / max(s_max - s_min, 1e-6))
+            rect = mpatches.Rectangle(
+                (x_orig - eff_radius, y_orig - eff_radius),
+                2 * eff_radius, 2 * eff_radius,
+                linewidth=0.8, edgecolor=colour, facecolor="none", alpha=0.85,
+            )
+            ax.add_patch(rect)
+
+        ax.set_title(
+            f"Top {len(peaks)} of {len(all_peaks)} NCC matches after 3D NMS  "
+            f"(colour = score, warm = high)"
+        )
+        ax.axis("off")
         fig.tight_layout()
         fig.savefig(path, dpi=150, bbox_inches="tight")
         plt.close(fig)
@@ -178,7 +239,7 @@ class BubblePipeline:
         if not ncc_results:
             return
 
-        # Pick the level with the highest total score magnitude (most signal)
+        # pick the level where the NCC signal has the most total energy — usually the scale matching the most bubbles
         best_idx = int(np.argmax([np.abs(sm).sum() for _, sm in ncc_results]))
         eff_radius, score_map = ncc_results[best_idx]
 
@@ -186,7 +247,7 @@ class BubblePipeline:
         ax1.imshow(image, cmap="gray")
         ax1.set_title("Original")
         ax1.axis("off")
-        im = ax2.imshow(score_map, cmap="hot", vmin=-1, vmax=1)
+        im = ax2.imshow(score_map, cmap="hot", vmin=-1, vmax=1)  # hot colormap: bright = high NCC score
         ax2.set_title(f"NCC score map  (eff. radius \u2248 {eff_radius:.1f} px)")
         ax2.axis("off")
         fig.colorbar(im, ax=ax2, fraction=0.046, pad=0.04)
@@ -198,7 +259,7 @@ class BubblePipeline:
     def load(cls, path: Path) -> "BubblePipeline":
         with open(path, "rb") as f:
             data = pickle.load(f)
-        pipeline = cls(data["config"])
+        pipeline = cls(data["config"])      # reconstruct with the config that was used during training
         pipeline.templates = data["templates"]
         pipeline.calibrator = data["calibrator"]
         return pipeline

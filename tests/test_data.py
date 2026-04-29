@@ -16,7 +16,7 @@ from bubble_histogram.data import parse_annotations, load_image, get_session_id,
 def test_config_defaults():
     cfg = PipelineConfig()
     assert cfg.num_templates == 1
-    assert cfg.template_size == 10
+    assert cfg.template_size == 13
     assert cfg.scale_factor == 0.9
     assert cfg.min_radius == 1.0
     assert cfg.max_radius == 50.0

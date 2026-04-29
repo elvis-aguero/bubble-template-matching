@@ -1,33 +1,92 @@
 #!/usr/bin/env python3
-"""Fit bubble histogram pipeline on annotated data and save to disk."""
+"""
+Train the bubble size histogram pipeline on annotated images and save all artifacts.
+
+USAGE
+-----
+  python scripts/train.py <data_dir> <output.pkl> [options]
+
+WHAT IT DOES
+------------
+  1. Loads annotated images from <data_dir>/images/ and <data_dir>/labels/.
+  2. Splits them into three non-overlapping sets:
+       template    (default 30%) — bubble patches averaged into the NCC template
+       calibration (default 65%) — NCC scores used to fit P(bubble|score)
+       test        (default  5%) — held-out images never seen during training
+  3. Trains a BubblePipeline: builds templates, fits the Bayesian calibrator,
+     estimates the bubble prior from calibration images.
+  4. Saves <output.pkl> plus diagnostic artifacts in the same directory:
+       *_templates.png          — the learned template(s); should show a dark disc
+       *_score_histograms.png   — P(score|bubble) vs P(score|background); should be separated
+       *_split.json             — exact image-to-split assignment for reproducibility
+       *_ncc_TEST_<name>.png    — NCC score map for the test image at the most active scale
+       *_top_matches_TEST_<name>.png  — top-100 NCC peaks after 3D NMS, drawn as bounding boxes
+       *_size_hist_<name>.png   — predicted size histogram vs annotated ground truth
+
+QUICK START
+-----------
+  # Basic run (random 30/65/5 split, seed=42)
+  python scripts/train.py seed_v04/ output/pipeline.pkl
+
+  # Reproducible split with a specific seed
+  python scripts/train.py seed_v04/ output/pipeline.pkl --split-seed 7
+
+  # Leave-one-session-out (for cross-validation; available sessions: C1S0004 C1S0010 C1S0014 C1S0019 C1S0024)
+  python scripts/train.py seed_v04/ output/pipeline_no_C1S0010.pkl --val-session C1S0010
+
+  # Load the saved pipeline later
+  from bubble_histogram.pipeline import BubblePipeline
+  pipeline = BubblePipeline.load("output/pipeline.pkl")
+  result = pipeline.predict(image)  # {"radius_px": [...], "expected_count": [...]}
+"""
 import argparse
 from pathlib import Path
 
 import numpy as np
 
 from bubble_histogram.config import PipelineConfig
-from bubble_histogram.data import AnnotatedDataset, load_image
+from bubble_histogram.data import AnnotatedDataset
 from bubble_histogram.histogram import plot_histogram
 from bubble_histogram.pipeline import BubblePipeline
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train bubble histogram pipeline.")
-    parser.add_argument("data_dir", type=Path, help="Path to seed_v04/ directory")
-    parser.add_argument("output", type=Path, help="Output path for saved pipeline (.pkl)")
-    parser.add_argument("--val-session", default=None,
-                        help="LOSO: session ID to hold out for validation (disables image-level split)")
-    parser.add_argument("--template-frac", type=float, default=0.30,
-                        help="Fraction of images used for template construction (default 0.30)")
-    parser.add_argument("--calibration-frac", type=float, default=0.65,
-                        help="Fraction of images used for calibration (default 0.65)")
-    parser.add_argument("--split-seed", type=int, default=42,
-                        help="Random seed for image-level split")
-    parser.add_argument("--num-templates", type=int, default=1)
-    parser.add_argument("--template-size", type=int, default=10)
-    parser.add_argument("--scale-factor", type=float, default=0.9)
-    parser.add_argument("--min-radius", type=float, default=1.0)
-    parser.add_argument("--max-radius", type=float, default=50.0)
+    parser = argparse.ArgumentParser(
+        description="Train the bubble histogram pipeline and save artifacts.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument("data_dir", type=Path,
+                        help="Root of annotated dataset (must contain images/ and labels/ subdirs)")
+    parser.add_argument("output", type=Path,
+                        help="Where to save the trained pipeline (.pkl). Artifacts are written alongside it.")
+
+    split = parser.add_argument_group("data split")
+    split.add_argument("--val-session", default=None,
+                       help="Leave-one-session-out mode: hold out this session ID (e.g. C1S0010). "
+                            "Overrides the random image-level split.")
+    split.add_argument("--template-frac", type=float, default=0.30,
+                       help="Fraction of images used for template construction (default 0.30)")
+    split.add_argument("--calibration-frac", type=float, default=0.65,
+                       help="Fraction of images used for Bayesian calibration (default 0.65). "
+                            "Remaining images become the test set.")
+    split.add_argument("--split-seed", type=int, default=42,
+                       help="Random seed for the image-level split (default 42)")
+
+    _d = PipelineConfig()  # pull defaults from one place
+    tmpl = parser.add_argument_group("template / pyramid")
+    tmpl.add_argument("--num-templates", type=int, default=_d.num_templates,
+                      help=f"Number of appearance templates (size bins). Default {_d.num_templates} pools all bubbles.")
+    tmpl.add_argument("--template-size", type=int, default=_d.template_size,
+                      help=f"Template side length in pixels (default {_d.template_size}). "
+                           "Each bubble patch is resized to this before averaging.")
+    tmpl.add_argument("--scale-factor", type=float, default=_d.scale_factor,
+                      help=f"Pyramid downscale factor per level (default {_d.scale_factor}). "
+                           "Smaller = finer size resolution but more levels.")
+    tmpl.add_argument("--min-radius", type=float, default=_d.min_radius,
+                      help=f"Smallest bubble radius to detect in original image pixels (default {_d.min_radius})")
+    tmpl.add_argument("--max-radius", type=float, default=_d.max_radius,
+                      help=f"Largest bubble radius to detect in original image pixels (default {_d.max_radius})")
     args = parser.parse_args()
 
     cfg = PipelineConfig(
@@ -58,16 +117,7 @@ def main():
     pipeline.train(ds)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-
-    # Save NCC maps for up to 2 calibration images
-    ncc_imgs, ncc_names = [], []
-    for p in ds.calibration_images[:2]:
-        ncc_imgs.append(load_image(p))
-        ncc_names.append(p.stem[:40])  # truncate long stems
-
-    pipeline.save(args.output,
-                  ncc_images=ncc_imgs if ncc_imgs else None,
-                  ncc_names=ncc_names if ncc_names else None)
+    pipeline.save(args.output)
     print(f"Pipeline saved to {args.output}")
     print(f"Artifacts written alongside: {args.output.parent}/")
 
@@ -88,6 +138,13 @@ def main():
             )
             pipeline.save_ncc_png(ncc_out, sample.image)
             print(f"Test NCC map saved to {ncc_out}")
+
+            # Top-100 3D-NMS matches with bounding boxes
+            matches_out = args.output.with_name(
+                f"{args.output.stem}_top_matches_TEST_{p.stem[:40]}.png"
+            )
+            pipeline.save_top_matches_png(matches_out, sample.image, top_n=100)
+            print(f"Top matches saved to {matches_out}")
 
             # Bin annotated radii into the same pyramid-level bins
             radii = np.array(result["radius_px"])

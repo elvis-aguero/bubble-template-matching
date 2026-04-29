@@ -6,10 +6,12 @@ from bubble_histogram.ncc import build_pyramid, compute_ncc_maps
 
 
 def test_pyramid_levels():
-    cfg = PipelineConfig(template_size=10, scale_factor=0.9, min_radius=1.0, max_radius=50.0)
+    cfg = PipelineConfig(template_size=10, scale_factor=0.9, min_radius=1.0, max_radius=50.0,
+                         template_context_factor=1.0)
     img = np.random.rand(100, 100).astype(np.float32)
     levels = build_pyramid(img, cfg)
-    expected_n = math.ceil(math.log(cfg.max_radius / (cfg.template_size / 2)) / math.log(1 / cfg.scale_factor))
+    canonical_radius = cfg.template_size / (2 * cfg.template_context_factor)
+    expected_n = math.ceil(math.log(cfg.max_radius / canonical_radius) / math.log(1 / cfg.scale_factor))
     assert len(levels) == expected_n
 
 
