@@ -1,6 +1,6 @@
 import math
+import cv2
 import numpy as np
-from skimage.transform import resize as sk_resize
 
 from bubble_histogram.config import PipelineConfig
 from bubble_histogram.data import AnnotatedDataset
@@ -60,11 +60,12 @@ def build_templates(
 
             # resize every patch to the same template_size × template_size shape
             # so that patches from different-sized bubbles can be averaged together
-            resized = sk_resize(
-                patch,
-                (config.template_size, config.template_size),
-                anti_aliasing=True,     # anti_aliasing prevents aliasing artifacts when downscaling large bubbles
-            ).astype(np.float32)
+            # cv2.resize takes (width, height) — note the transposed order vs numpy shape
+            # INTER_AREA for downscaling (correct area average); INTER_LINEAR for upscaling
+            # (patches from small bubbles are smaller than template_size and need upscaling)
+            ts = config.template_size
+            interp = cv2.INTER_AREA if patch.shape[0] >= ts else cv2.INTER_LINEAR
+            resized = cv2.resize(patch, (ts, ts), interpolation=interp).astype(np.float32)
 
             # normalise each patch to sum=1 before averaging so that bright and dark images
             # contribute equally regardless of their absolute intensity level

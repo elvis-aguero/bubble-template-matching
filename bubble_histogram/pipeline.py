@@ -81,21 +81,34 @@ class BubblePipeline:
         expected_counts = []
 
         from skimage.feature import peak_local_max
+        from bubble_histogram.calibration import nms_3d
         min_d = 2   # minimum pixel distance between local maxima; small because NCC response is smooth
 
-        # use_lm: if True, sum P(bubble) only at local maxima instead of every pixel
-        # summing over all pixels overcounts by ~100× because each bubble creates a broad halo
         use_lm = self.config.predict_local_maxima or self.config.local_maxima_calibration
-        for eff_radius, score_map in ncc_results:
-            if use_lm:
-                peaks = peak_local_max(score_map, min_distance=min_d,
-                                       exclude_border=False)
-                scores = score_map[peaks[:, 0], peaks[:, 1]] if len(peaks) else np.array([])
-            else:
-                scores = score_map.ravel()  # dense: every pixel contributes (not recommended)
-            probs = self.calibrator.predict(scores) if len(scores) else np.array([])
-            expected_counts.append(float(probs.sum()))  # expected count = sum of P(bubble) over candidates
-            radius_px.append(eff_radius)
+
+        if use_lm and self.config.nms_iou_threshold > 0.0:
+            # Cross-scale IoU NMS: collect all peaks across all levels, suppress overlapping
+            # detections globally (not per-level), then accumulate P(bubble) per level.
+            # This prevents the same bubble from being counted at multiple scale levels.
+            survivors = nms_3d(ncc_results, self.config)
+            level_probs: dict[int, float] = {i: 0.0 for i in range(len(ncc_results))}
+            for score, level_idx, _y, _x, _r in survivors:
+                prob = float(self.calibrator.predict(np.array([score], dtype=np.float32))[0])
+                level_probs[level_idx] += prob
+            for i, (eff_radius, _) in enumerate(ncc_results):
+                expected_counts.append(level_probs[i])
+                radius_px.append(eff_radius)
+        else:
+            # Per-level 2D NMS: peaks found independently at each scale (no cross-scale suppression)
+            for eff_radius, score_map in ncc_results:
+                if use_lm:
+                    peaks = peak_local_max(score_map, min_distance=min_d, exclude_border=False)
+                    scores = score_map[peaks[:, 0], peaks[:, 1]] if len(peaks) else np.array([])
+                else:
+                    scores = score_map.ravel()  # dense: every pixel contributes (not recommended)
+                probs = self.calibrator.predict(scores) if len(scores) else np.array([])
+                expected_counts.append(float(probs.sum()))
+                radius_px.append(eff_radius)
 
         return {"radius_px": radius_px, "expected_count": expected_counts}
 
@@ -206,8 +219,7 @@ class BubblePipeline:
         scores = [p[0] for p in peaks]
         s_min, s_max = min(scores), max(scores)
 
-        for score, level, y_orig, x_orig in peaks:
-            eff_radius = ncc_results[level][0]  # box size = template footprint at this scale level
+        for score, level, y_orig, x_orig, eff_radius in peaks:
             colour = cmap((score - s_min) / max(s_max - s_min, 1e-6))
             rect = mpatches.Rectangle(
                 (x_orig - eff_radius, y_orig - eff_radius),

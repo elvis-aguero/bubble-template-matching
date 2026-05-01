@@ -18,7 +18,7 @@ def test_config_defaults():
     assert cfg.num_templates == 1
     assert cfg.template_size == 13
     assert cfg.scale_factor == 0.9
-    assert cfg.min_radius == 1.0
+    assert cfg.min_radius == 3.0
     assert cfg.max_radius == 50.0
     assert cfg.n_score_bins == 50
     assert cfg.neg_sample_ratio == 10

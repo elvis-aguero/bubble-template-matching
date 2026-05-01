@@ -9,6 +9,7 @@ requires-python = ">=3.10"
 dependencies = [
     "numpy",
     "scikit-image",
+    "opencv-python",
     "Pillow",
     "matplotlib",
 ]

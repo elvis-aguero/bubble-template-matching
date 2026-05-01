@@ -6,13 +6,25 @@ from bubble_histogram.ncc import build_pyramid, compute_ncc_maps
 
 
 def test_pyramid_levels():
-    cfg = PipelineConfig(template_size=10, scale_factor=0.9, min_radius=1.0, max_radius=50.0,
-                         template_context_factor=1.0)
+    canonical_radius = 5.0  # ts=10, cf=1.0
+    cfg = PipelineConfig(template_size=10, scale_factor=0.9, min_radius=canonical_radius,
+                         max_radius=50.0, template_context_factor=1.0)
     img = np.random.rand(100, 100).astype(np.float32)
     levels = build_pyramid(img, cfg)
-    canonical_radius = cfg.template_size / (2 * cfg.template_context_factor)
+    # min_radius == canonical_radius → n_up=0, recovers old downscale-only count
     expected_n = math.ceil(math.log(cfg.max_radius / canonical_radius) / math.log(1 / cfg.scale_factor))
     assert len(levels) == expected_n
+
+
+def test_pyramid_levels_with_upscaling():
+    cfg = PipelineConfig(template_size=10, scale_factor=0.9, min_radius=1.0, max_radius=50.0,
+                         template_context_factor=1.0)
+    canonical_radius = cfg.template_size / (2 * cfg.template_context_factor)
+    img = np.random.rand(100, 100).astype(np.float32)
+    levels = build_pyramid(img, cfg)
+    n_down = math.ceil(math.log(cfg.max_radius / canonical_radius) / math.log(1 / cfg.scale_factor))
+    n_up = math.ceil(math.log(canonical_radius / cfg.min_radius) / math.log(1 / cfg.scale_factor))
+    assert len(levels) == n_up + n_down
 
 
 def test_pyramid_shapes_shrink():
@@ -20,6 +32,8 @@ def test_pyramid_shapes_shrink():
     img = np.random.rand(200, 200).astype(np.float32)
     levels = build_pyramid(img, cfg)
     shapes = [lvl[1].shape for lvl in levels]
+    # upscaling levels come first (largest images), downscaling levels follow —
+    # overall shape must be monotonically non-increasing throughout
     for i in range(1, len(shapes)):
         assert shapes[i][0] <= shapes[i - 1][0]
 

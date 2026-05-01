@@ -119,52 +119,75 @@ def sample_scores(
     return np.array(pos_scores, dtype=np.float32), np.array(neg_scores, dtype=np.float32)
 
 
+def _iou(y1: float, x1: float, r1: float, y2: float, x2: float, r2: float) -> float:
+    """IoU of two axis-aligned square bounding boxes centred at (y,x) with half-side r."""
+    ax0, ay0, ax1, ay1 = x1 - r1, y1 - r1, x1 + r1, y1 + r1
+    bx0, by0, bx1, by1 = x2 - r2, y2 - r2, x2 + r2, y2 + r2
+    inter_w = max(0.0, min(ax1, bx1) - max(ax0, bx0))
+    inter_h = max(0.0, min(ay1, by1) - max(ay0, by0))
+    inter = inter_w * inter_h
+    if inter == 0.0:
+        return 0.0
+    union = (2 * r1) ** 2 + (2 * r2) ** 2 - inter
+    return inter / union
+
+
 def nms_3d(
     ncc_results: list[tuple[float, np.ndarray]],
     config: PipelineConfig,
-) -> list[tuple[float, int, float, float]]:
+    iou_threshold: float | None = None,
+) -> list[tuple[float, int, float, float, float]]:
     """
-    3D NMS across spatial locations and scale levels.
+    Greedy IoU-based NMS across all spatial locations and scale levels.
 
-    Collects 2D local-maxima peaks at each pyramid level, maps them to original-image
-    coordinates, then greedily suppresses any peak that has a higher-scoring neighbour
-    within ``template_size / 2`` pixels AND within 1 adjacent scale level.
+    Collects 2D local-maxima peaks at every pyramid level, maps them to
+    original-image coordinates, sorts by score descending, then greedily
+    keeps a peak only if it does not overlap (IoU > threshold) with any
+    already-kept higher-scoring peak.  No adjacency restriction on scale.
+
+    Parameters
+    ----------
+    iou_threshold : override config.nms_iou_threshold when provided
 
     Returns
     -------
-    List of (score, level, y_orig, x_orig) sorted by score descending.
+    List of (score, level, y_orig, x_orig, eff_radius) sorted by score descending.
     """
+    threshold = iou_threshold if iou_threshold is not None else config.nms_iou_threshold
     min_d = _lm_min_dist(config)
-    D_orig = config.template_size / 2  # suppression radius in original-image pixels
 
-    # Coordinate identity: alpha_l = template_size / (2 * eff_radius)
-    # so (y_l, x_l) → (y_l / alpha_l, x_l / alpha_l) = (y_l * 2*eff_r / ts, ...)
-    candidates: list[tuple[float, int, float, float]] = []
+    candidates: list[tuple[float, int, float, float, float]] = []
     for level, (eff_radius, score_map) in enumerate(ncc_results):
+        # alpha maps score-map coordinates → original-image coordinates
         alpha = config.template_size / (2.0 * config.template_context_factor * eff_radius)
         peaks = peak_local_max(score_map, min_distance=min_d, exclude_border=False)
+        # bounding box half-side = full template footprint in original image coordinates,
+        # which includes the context ring: eff_radius × context_factor.
+        # Using just eff_radius (bubble-only) would underestimate the detector's spatial
+        # extent and produce artificially low IoU between same-bubble detections.
+        footprint = eff_radius * config.template_context_factor
         for y_l, x_l in peaks:
             candidates.append((
                 float(score_map[y_l, x_l]),
                 level,
-                y_l / alpha,    # map score map coordinates back to original image coordinates
-                x_l / alpha,
+                y_l / alpha,    # y in original image coordinates
+                x_l / alpha,    # x in original image coordinates
+                footprint,      # half-side of the detection bounding box
             ))
 
-    candidates.sort(key=lambda c: c[0], reverse=True)  # process highest-scoring peaks first
+    candidates.sort(key=lambda c: c[0], reverse=True)  # highest score first
     suppressed = [False] * len(candidates)
-    kept: list[tuple[float, int, float, float]] = []
+    kept: list[tuple[float, int, float, float, float]] = []
 
-    for i, (si, li, yi, xi) in enumerate(candidates):
+    for i, (si, li, yi, xi, ri) in enumerate(candidates):
         if suppressed[i]:
             continue
         kept.append(candidates[i])
-        # suppress any lower-scoring peak within D_orig pixels and at an adjacent scale level
         for j in range(i + 1, len(candidates)):
             if suppressed[j]:
                 continue
-            _, lj, yj, xj = candidates[j]
-            if abs(li - lj) <= 1 and abs(yi - yj) < D_orig and abs(xi - xj) < D_orig:
+            _, _lj, yj, xj, rj = candidates[j]
+            if _iou(yi, xi, ri, yj, xj, rj) > threshold:
                 suppressed[j] = True
 
     return kept

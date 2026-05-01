@@ -1,6 +1,6 @@
 import math
+import cv2
 import numpy as np
-from skimage.transform import rescale
 from skimage.feature import match_template
 
 from bubble_histogram.config import PipelineConfig
@@ -25,25 +25,38 @@ def build_pyramid(image: np.ndarray, config: PipelineConfig) -> list[tuple]:
     # A 5px-radius bubble at level 0 fills exactly the template's inner region.
     canonical_radius = config.template_size / (2 * config.template_context_factor)
 
-    # number of pyramid levels needed to cover [canonical_radius, max_radius]
-    # derived from: canonical_radius / scale_factor^n_levels = max_radius
-    n_levels = math.ceil(
+    # downscaling levels: cover [canonical_radius, max_radius]
+    n_down = math.ceil(
         math.log(config.max_radius / canonical_radius)
         / math.log(1 / config.scale_factor)
     )
+    # upscaling levels: cover [min_radius, canonical_radius)
+    # if min_radius >= canonical_radius there is nothing to upscale and n_up = 0,
+    # recovering the previous behaviour exactly.
+    if config.min_radius < canonical_radius:
+        n_up = math.ceil(
+            math.log(canonical_radius / config.min_radius)
+            / math.log(1 / config.scale_factor)
+        )
+    else:
+        n_up = 0
 
     levels = []
-    for lvl in range(n_levels):
-        scale = config.scale_factor ** lvl          # cumulative scale at this level
-        effective_radius = canonical_radius / scale  # bubble radius in original px that matches the template at this level
+    for lvl in range(-n_up, n_down):
+        scale = config.scale_factor ** lvl          # < 1 for lvl > 0 (downscale), > 1 for lvl < 0 (upscale)
+        effective_radius = canonical_radius / scale
         if effective_radius > config.max_radius:
             break
 
         if lvl == 0:
-            scaled = image  # level 0: use the original image unchanged
+            scaled = image
         else:
-            # shrink the image so that a larger bubble now occupies canonical_radius pixels
-            scaled = rescale(image, scale, anti_aliasing=True, channel_axis=None).astype(np.float32)
+            h0, w0 = image.shape
+            new_w = max(1, int(round(w0 * scale)))
+            new_h = max(1, int(round(h0 * scale)))
+            # INTER_AREA for downscaling (correct area average); INTER_LINEAR for upscaling
+            interp = cv2.INTER_LINEAR if lvl < 0 else cv2.INTER_AREA
+            scaled = cv2.resize(image, (new_w, new_h), interpolation=interp)
 
         levels.append((lvl, scaled, effective_radius))
 
