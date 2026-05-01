@@ -39,6 +39,9 @@ def sample_scores(
     rng = np.random.default_rng(seed=42)    # fixed seed so calibration is reproducible across runs
     lm_mode = config.local_maxima_calibration
     min_d = _lm_min_dist(config)
+    # radius a bubble occupies in score-map pixels at its matching pyramid level;
+    # used as the LM positive-sample distance cutoff (any LM within the bubble projection counts)
+    canonical_radius = config.template_size / (2 * config.template_context_factor)
 
     for image_path in paths:
         sample = dataset.load_sample(image_path)
@@ -79,7 +82,9 @@ def sample_scores(
                     continue
                 dists = np.linalg.norm(peaks - np.array([[sy, sx]]), axis=1)
                 nearest_idx = int(np.argmin(dists))
-                if dists[nearest_idx] <= min_d:
+                # accept any LM within the bubble's full projection on the score map;
+                # the old 2-px cutoff silently dropped bubbles where NCC peaks off-centre
+                if dists[nearest_idx] <= canonical_radius:
                     py, px = peaks[nearest_idx]
                     pos_scores.append(float(score_map[py, px]))
             else:
@@ -100,12 +105,21 @@ def sample_scores(
                  max(0, sx0 - d):min(w0, sx0 + d)] = True
 
         if lm_mode:
-            # negatives: local maxima at level 0 that fall entirely outside all bubble zones
-            peaks_0 = peak_local_max(score_map_0, min_distance=min_d,
-                                     exclude_border=False)
-            for py, px in peaks_0:
-                if not excl[py, px]:
-                    neg_scores.append(float(score_map_0[py, px]))
+            # negatives: non-bubble local maxima pooled across ALL pyramid levels so the
+            # negative distribution matches what the calibrator sees at inference (LMs at every scale)
+            for li, (eff_r_l, score_map_l) in enumerate(ncc_results):
+                img_scale_l = canonical_radius / eff_r_l
+                hl, wl = score_map_l.shape
+                excl_l = np.zeros((hl, wl), dtype=bool)
+                for bubble in sample.bubbles:
+                    sx_l = int(round(bubble.cx * img_scale_l))
+                    sy_l = int(round(bubble.cy * img_scale_l))
+                    d_l = max(config.min_neg_dist, int(np.ceil(bubble.radius * img_scale_l)))
+                    excl_l[max(0, sy_l - d_l):min(hl, sy_l + d_l),
+                           max(0, sx_l - d_l):min(wl, sx_l + d_l)] = True
+                for py, px in level_peaks[li]:
+                    if not excl_l[py, px]:
+                        neg_scores.append(float(score_map_l[py, px]))
         else:
             # negatives: randomly sampled pixels outside the exclusion mask
             candidates = np.argwhere(~excl)

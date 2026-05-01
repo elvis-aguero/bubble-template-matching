@@ -227,6 +227,11 @@ class BubblePipeline:
                 linewidth=0.8, edgecolor=colour, facecolor="none", alpha=0.85,
             )
             ax.add_patch(rect)
+            ax.text(
+                x_orig + eff_radius - 1, y_orig - eff_radius + 1,
+                f"{score:.2f}",
+                color=colour, fontsize=4, ha="right", va="top", alpha=0.9,
+            )
 
         ax.set_title(
             f"Top {len(peaks)} of {len(all_peaks)} NCC matches after 3D NMS  "
