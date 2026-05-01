@@ -22,6 +22,7 @@ WHAT IT DOES
        *_ncc_TEST_<name>.png    — NCC score map for the test image at the most active scale
        *_top_matches_TEST_<name>.png  — top-100 NCC peaks after 3D NMS, drawn as bounding boxes
        *_size_hist_<name>.png   — predicted size histogram vs annotated ground truth
+       *_pr_curve.png           — precision-recall curve pooled across all test images (AP in title)
 
 QUICK START
 -----------
@@ -128,8 +129,10 @@ def main():
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
+        test_samples = []
         for p in test_paths:
             sample = ds.load_sample(p)
+            test_samples.append(sample)
             result = pipeline.predict(sample.image)
 
             # NCC score map — prefixed with TEST_ so it's clearly distinct
@@ -169,6 +172,10 @@ def main():
             fig.savefig(hist_out, dpi=150, bbox_inches="tight")
             plt.close(fig)
             print(f"Size histogram saved to {hist_out}")
+
+        pr_out = args.output.with_name(f"{args.output.stem}_pr_curve.png")
+        pipeline.save_pr_curve_png(pr_out, test_samples)
+        print(f"PR curve saved to {pr_out}")
 
 
 if __name__ == "__main__":

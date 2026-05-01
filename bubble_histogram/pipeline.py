@@ -237,6 +237,90 @@ class BubblePipeline:
         fig.savefig(path, dpi=150, bbox_inches="tight")
         plt.close(fig)
 
+    def save_pr_curve_png(self, path: Path, samples: list) -> None:
+        """
+        Save a precision-recall curve PNG evaluated on the given samples.
+
+        Detections come from nms_3d (ranked by score).  A detection is a true
+        positive if its centre lands within the annotated bubble's radius of any
+        unmatched annotation (greedy, highest-score first).  The curve is pooled
+        across all samples; AP is computed as the area under the interpolated curve.
+        """
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from bubble_histogram.calibration import nms_3d
+
+        all_detections: list[tuple[float, bool]] = []   # (score, is_tp)
+        total_gt = 0
+
+        for sample in samples:
+            ncc_results = compute_ncc_maps(sample.image, self.templates, self.config)
+            if not ncc_results:
+                continue
+
+            peaks = nms_3d(ncc_results, self.config)    # sorted by score desc
+            gt = [(b.cy, b.cx, b.radius) for b in sample.bubbles]
+            total_gt += len(gt)
+            matched_gt: set[int] = set()
+
+            for score, _level, y_orig, x_orig, _eff_r in peaks:
+                best_dist = float("inf")
+                best_i = -1
+                for i, (cy, cx, r) in enumerate(gt):
+                    if i in matched_gt:
+                        continue
+                    dist = float(np.sqrt((y_orig - cy) ** 2 + (x_orig - cx) ** 2))
+                    if dist < r and dist < best_dist:
+                        best_dist = dist
+                        best_i = i
+                if best_i >= 0:
+                    matched_gt.add(best_i)
+                    all_detections.append((score, True))
+                else:
+                    all_detections.append((score, False))
+
+        if not all_detections or total_gt == 0:
+            return
+
+        all_detections.sort(key=lambda d: d[0], reverse=True)
+
+        tp = 0
+        fp = 0
+        precisions: list[float] = []
+        recalls: list[float] = []
+        for _, is_tp in all_detections:
+            if is_tp:
+                tp += 1
+            else:
+                fp += 1
+            precisions.append(tp / (tp + fp))
+            recalls.append(tp / total_gt)
+
+        # Interpolated AP: for each point, use the max precision at that recall or higher
+        prec = np.array([1.0] + precisions + [0.0], dtype=np.float64)
+        rec  = np.array([0.0] + recalls   + [recalls[-1]], dtype=np.float64)
+        for i in range(len(prec) - 2, -1, -1):
+            prec[i] = max(prec[i], prec[i + 1])
+        ap = float(np.trapz(prec, rec))
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.plot(recalls, precisions, color="steelblue", linewidth=1.5)
+        ax.fill_between(recalls, precisions, alpha=0.15, color="steelblue")
+        ax.set_xlabel("Recall")
+        ax.set_ylabel("Precision")
+        ax.set_xlim([0.0, 1.0])
+        ax.set_ylim([0.0, 1.02])
+        ax.set_title(
+            f"Precision–Recall Curve  (AP = {ap:.3f})\n"
+            f"{total_gt} GT bubbles · {len(all_detections)} detections · "
+            f"{len(samples)} image(s)"
+        )
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
     def save_ncc_png(self, path: Path, image: np.ndarray) -> None:
         """Public wrapper — save NCC score map for a given image."""
         self._save_ncc_png(path, image)
