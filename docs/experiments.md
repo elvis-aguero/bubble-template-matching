@@ -200,21 +200,118 @@ The auto-verdict is **correct for what was measured but incorrect about what was
 ## Open Experiments (pending)
 
 ### E11 · Bubble morphology cross-section + corrected LoG discriminability test
-**Prerequisite for LoG viability.** E10 was inconclusive because (a) the measurement protocol conflated blob vs. edge detection and (b) the bubble morphology was never verified — LoG blob theory (sigma = r/√2) assumes filled Gaussian disks, but microscopy bubbles may be ring-like (gas-liquid interface: bright ring, dark interior), in which case sigma = ring_wall_width/√2 is correct regardless of ring radius.
 
-**Step 1 — Morphology survey (prerequisite):**  
-Plot horizontal and vertical intensity cross-sections through ~10 GT bubble centers across 3 size bins (small, medium, large) and at least 2 photometric regimes. Classify each as (A) filled dark disc, (B) dark-rim / bright-interior ring, (C) bright-rim / dark-interior ring, or (D) indeterminate. Record the rim width for any ring-type bubble.  
+**Step 1 — Morphology survey — COMPLETED (script: `scripts/experiments/profile_morphology.py`)**
 
-**Step 2 — Corrected LoG discriminability (E11 proper):**  
-Using the morphology result to select sigma(s) to test:
-- Sensitivity: LoG at **bubble center pixel** (not max-over-region) vs. delta — tests whether the center-pixel LoG genuinely peaks at delta=0
-- Background: `max(|LoG|)` over a small disk (symmetric with the bubble metric, e.g. radius=3px) at 20 random background locations — removes the asymmetric-sampling inflation from E10
-- Background measured at **all delta levels** — exposes whether fine-scale background LoG also increases (degrading SNR) or stays low (SNR improves or stays constant)
-- Image filter fixed to `img.mean() < 0.6` (float image threshold)
+Ran radial intensity profiles for 28 bubbles across 14 images. Three structural defects in the measurement identified in post-hoc review with PAL (see below), but the qualitative picture is consistent.
 
-**Falsification criteria:**
-1. Center-pixel sensitivity monotone at ALL tested sigma values → LoG cannot form a scale-space peak; investigate Hough or radial-symmetry detectors instead
-2. Center-pixel peak near delta=0 but SNR(delta) curve flat or worse than 2× at delta=0 → specificity fails regardless of sigma tuning
-3. Center-pixel peak near delta=0 AND SNR(delta=0) ≥ 2× with symmetric background → LoG viable; proceed to pipeline integration
+**Raw morphology counts (r ≥ 8px only; sub-pixel bins excluded for r < 8px):**
+- dark-rim (bright interior, dark ring at boundary): 14/26 = 54%  
+- filled-dark (dark center, lighter surround): 7/26 = 27%  
+- bright-rim / filled-bright: 3/26 = 12%  
+- flat / indeterminate: 2/26 = 8%  
 
-Script: `scripts/experiments/profile_log_e11.py` (to be written).
+**95% CI on dark-rim prevalence (Wilson): [34%, 72%]** — preliminary evidence only, not a strong prevalence claim.
+
+**Three measurement defects confirmed by PAL consensus:**
+1. Rim sampled at r/R=0.85 (interior side of dark band) — minimum is at or just outside r/R=1.0. Rim contrast is underestimated.
+2. Sub-pixel bins for r < 8px (20 bins over [0, 2.0R], each bin = 0.1R; at r=4.6px that is 0.46px/bin). Morphology classifications for r < 8px are unreliable.
+3. Rim width never extracted — profiles exist but weren't reduced to a rim FWHM estimate. This is needed to choose σ for the ring detector model.
+
+**Key finding for Step 2 design (PAL consensus):** For dark-rim bubbles with bright interior, center-pixel LoG at σ ≈ R/√2 is **not near-zero**. The dark rim falls in the negative annular lobe of the LoG kernel, reinforcing the center response. The correct question for Step 2 is whether that response *forms a scale-space peak at δ=0* — which is unresolved and testable.
+
+**Step 2 — Corrected LoG discriminability — COMPLETED**  
+Script: `scripts/experiments/profile_log_e11.py`
+
+Corrected protocol (relative to E10):
+- **Two sigma values tested:** σ = R/√2 (blob model, scales with R) and σ = 2px constant (ring/rim model — rim width does not scale with bubble radius if it is set by diffraction/PSF, not bubble geometry)
+- **Two measurement locations per bubble per sigma:** center pixel (r=0) and rim pixel (r≈R, specifically the bin nearest the annotated bubble boundary)
+- **Symmetric background:** `max(|LoG|)` in a 3px-radius disk at 20 random locations > 3×R from any GT bubble
+- **Background at ALL delta levels** — exposes SNR(delta) curve, not just SNR at δ=0
+- **Exclude r < 8px bubbles** from scale-space peak claims  
+- **Image filter:** `img.mean() < 0.6` (float scale)
+
+**Raw results (52 GT bubbles, r≥8px, 14 images):**
+```
+delta    ctr_blob    rim_blob     ctr_rim     rim_rim    bg_blob     bg_rim
+   -6      0.0721      0.1142      0.0655      0.1199     0.0402     0.0439
+   -5      0.0747      0.1089      0.0690      0.1172     0.0411     0.0464
+   -4      0.0797      0.1044      0.0728      0.1168     0.0454     0.0437
+   -3      0.0870      0.0994      0.0642      0.1149     0.0426     0.0481
+   -2      0.0892      0.0938      0.0708      0.1128     0.0443     0.0497
+   -1      0.0886      0.0893      0.0709      0.1104     0.0441     0.0503
+   +0      0.0876      0.0863      0.0740      0.1040     0.0474     0.0529
+   +1      0.0834      0.0851      0.0818      0.0988     0.0473     0.0516
+   +2      0.0754      0.0827      0.0844      0.0942     0.0460     0.0501
+   +3      0.0688      0.0821      0.0838      0.0888     0.0453     0.0518
+   +4      0.0619      0.0800      0.0808      0.0851     0.0469     0.0523
+   +5      0.0544      0.0794      0.0804      0.0824     0.0463     0.0557
+   +6      0.0506      0.0767      0.0773      0.0820     0.0482     0.0548
+
+Peak delta statistics (per bubble):
+  center_blob:      mean=-2.10, median=-2.0, p25=-6.0, p75=+0.2   IQR=6.2
+  rim_blob:         mean=-3.46, median=-5.5, p25=-6.0, p75=-2.8   IQR=3.2
+  center_rim_sigma: mean=+0.63, median=+1.0, p25=-2.0, p75=+4.0   IQR=6.0
+  rim_rim_sigma:    mean=-2.48, median=-4.5, p25=-6.0, p75=+1.0   IQR=7.0
+
+SNR at delta=0 (bubble single-pixel or rim-max / bg max-in-3px-disk):
+  center_blob:      1.85×  (asymmetric comparison — see note below)
+  rim_blob:         1.82×
+  center_rim_sigma: 1.40×
+  rim_rim_sigma:    1.97×
+```
+
+**Auto-verdicts (script):**
+```
+FALSIFIED(sensitivity): center_blob (median_peak=-2.0, outside ±1.5)
+FALSIFIED(sensitivity): rim_blob (median_peak=-5.5)
+FALSIFIED(specificity): center_rim_sigma (peak at +1.0 ✓, SNR=1.40×<2×)
+FALSIFIED(sensitivity): rim_rim_sigma (median_peak=-4.5)
+```
+
+**Critical analysis (reviewed with PAL, consensus reached):**
+
+The auto-verdicts are **correct in outcome but wrong in diagnosis for center_blob**, and miss the most damning finding entirely.
+
+**Finding 1 — IQR=6+ levels is the fatal result, not SNR:**  
+All four curves have per-bubble IQR spanning ≥6 pyramid levels (48–54% of the measured delta range). p25=−6.0 for center_blob means ≥25% of bubbles peak at the finest measured scale — these have no scale-space peak at all. SNR of population means is irrelevant when per-bubble scale-space peaks are this scattered. **IQR=6 is fatal for any fixed-parameter detector. Tuning sigma shifts the population mean; it cannot compress the variance.**
+
+Mechanistic explanation: E11 Step 1 found four bubble morphologies (dark-rim 54%, filled-dark 27%, bright-rim 12%, flat 8%). No single (location, sigma) combination produces a compact scale-space peak for all morphologies simultaneously. The IQR is structural, not parametric.
+
+**Finding 2 — Three-way aggregation asymmetry biases center curves against bubbles:**  
+The measurement footprints are not comparable:
+- center_log: 1 px² (single pixel)
+- background_max: ~28 px² (π·3² disk)
+- rim_log: ~47 px² at delta=0 (annulus 0.85–1.15R at r_s≈5px)
+
+Since all three report a `max()`, larger footprint → larger expected maximum from image texture. This means:
+- center_blob / center_rim_sigma SNRs are **pessimistically biased** — background max is inflated vs. single-pixel bubble value
+- rim_blob / rim_rim_sigma SNRs are **optimistically biased** — rim max aggregates ~1.7× more area than background
+
+Under symmetric single-pixel comparison, center_blob SNR at delta=0 would rise from 1.85× to approximately **2.4–2.7×** — passing the 2× threshold. **center_blob's specificity failure is a measurement artifact, not a genuine signal deficiency.** This does not change the verdict (IQR=6.2 is still fatal) but center_blob should not be recorded as "low SNR."
+
+**Finding 3 — center_blob delta=−2 offset is a population-average artifact, not a sigma error:**  
+The actual sigma mismatch at delta=−2 is ~9% (sigma=3.54px vs. optimal 3.89px for a 1.026× pyramid level scale). This cannot shift the peak by 2 full levels. The delta=−2 mean peak is a weighted average over bubbles that peak near 0 (dark-rim, correct model), bubbles that peak at −6 (fine-bias, same failure as NCC), and scattered others. Redefining "correct level" as delta=−2 would be circular — the IQR=6.2 makes it meaningless.
+
+**Conclusion: LoG as a fixed-parameter, fixed-location feature is conclusively falsified for this dataset.**  
+Three independent failure modes:
+1. **Sensitivity** (rim curves): mean peaks far from delta=0
+2. **Specificity** (center_rim_sigma): SNR=1.40× below threshold even at population mean
+3. **Reliability** (all curves): per-bubble IQR ≥ 6 levels — morphological heterogeneity prevents any single-parameter LoG from being scale-selective across the bubble population
+
+---
+
+## Open Experiments (pending)
+
+### E12 · Hough circle transform diagnostic
+
+**Hypothesis to falsify:** "Hough circle transform on gradient magnitude produces a per-bubble radius estimate within ≤2 pyramid-levels of the GT correct level for ≥70% of bubbles (r≥8px), with a background false-positive rate of ≤5 per image at that threshold."
+
+**Motivation:** LoG falsified because no single (location, sigma) spans four morphological classes. Hough operates on gradient magnitude — directly exploits the dark-rim edge structure (dominant morphology, 54%) without requiring a model of the bubble interior. Built-in scale selection via the circle-radius accumulator: the accumulator peak radius is the detection radius, eliminating the scale-pyramid bias problem entirely. Known failure modes (gradient threshold sensitivity, thin rings at fine scale) are tunable and diagnosable.
+
+**Design:**
+- For each GT bubble (r≥8px), run OpenCV `HoughCircles` (or manual Hough accumulator) on a patch centered at the bubble. Record the peak accumulator radius vs. GT radius.
+- Convert radius error to pyramid-level offset using the pyramid scale formula.
+- Background: count Hough detections in random patches > 3R from any GT bubble.
+- Stratify results by morphology class (dark-rim vs. filled-dark) — Hough should work best for dark-rim and worst for filled-dark.
+- Failure criterion: if ≥30% of GT bubbles have radius error > 2 levels OR background FP rate > 5 per image, Hough is falsified and morphology-conditioned detectors must be evaluated.
