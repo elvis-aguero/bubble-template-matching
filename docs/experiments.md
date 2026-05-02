@@ -107,6 +107,114 @@ PAL also flagged that `_iou()` uses square boxes, making the delta=±3 suppressi
 
 ## Open Experiments (pending)
 
-### O3 · Scale-specific templates (`num_templates > 1`)
+### O3 · Scale-specific templates (`num_templates > 1`) — CLOSED WITHOUT RUNNING
 **Hypothesis:** A single averaged template blurs scale-specific appearance across a 15× size range. Separate templates per size bin should narrow the NCC ridge in scale space, making the correct-level peak more discriminative relative to adjacent-level competitors.  
-**Falsification:** Train with `num_templates=4`, re-run E3. If correct-level raw LM scores do not rise relative to adjacent-level competitor scores, template diversity is not the lever.
+**Why ruled out by E8 (consensus with PAL):** O3 requires that the cross-scale score gradient is caused by template-shape mismatch. E8 shows it is not: the −0.023/level monotone slope is a signal-density artifact — finer scales retain more high-frequency texture and ZNCC (a cosine similarity) scores higher on richer gradient fields regardless of template shape. E9 confirms: 600–1,600 spurious peaks per fine level, none real bubbles. These artifacts score high under any template because the image at fine scale has abundant local high-contrast structure for any small kernel to lock onto. Template diversity cannot create a scale-space peak where none exists in the physics of the feature. Scale normalisation (E5/E6) already showed a multiplicative score boost at δ=0 achieves only 13% rescue at α=2, with median competitor advantage 1.53×; template-induced perturbations at δ=0 would be far smaller. **O3 is logically falsified by the evidence already collected and should not be run.**
+
+---
+
+## Architecture Verdict
+
+### NCC cannot solve this dataset as annotated
+
+The E1–E9 chain, reviewed independently by PAL and confirmed by cross-experiment consistency, closes every classical NCC-based escape route:
+
+| Intervention | Experiment | Result | Mechanism closed |
+|---|---|---|---|
+| Per-level calibration | E1 | relL1 0.950 | Circular: trained on NMS survivors |
+| Global calibrator, GT positives | E4 | relL1 1.128 | Edge artifacts outscore GT centers |
+| Scale normalization | E5/E6 | ≤13% rescue | Score gap median 1.53×, heavy-tailed |
+| Per-level independent NMS | E9 | 24× over-prediction | No cross-scale suppression of edge artifacts |
+| Scale-specific templates | O3 | Not run | Ruled out by E8 physics argument |
+
+Root cause: **NCC is not a scale-selective feature**. Its scale-space response is monotonically biased toward fine scales by signal density, not by template fit. Cross-scale NMS over an NCC pyramid will always select the finest viable scale (evicting 88% of correct-level peaks); removing cross-scale NMS exposes thousands of fine-scale edge artifacts per level. There is no NMS regime and no calibrator design that resolves this contradiction.
+
+Additional hard floors:
+- **~50% photometrically dead frames** — any per-frame appearance detector averages in near-random predictions on half the dataset.
+- **GT label contamination** (low-circularity objects) — metric noise from bad labels is uncorrectable without cleaning.
+- **4 appearance regimes** — a single model averages across incompatible photometric conditions.
+
+---
+
+## Completed Experiments (continued)
+
+### E10 · LoG scale-space response diagnostic (INCONCLUSIVE — redesign required)
+**Hypothesis:** LoG (Laplacian of Gaussian) has a genuine scale-selective peak near delta=0 for GT bubbles AND that peak is significantly higher than LoG at non-bubble background locations at the same scale. Both conditions must hold for LoG to be a viable NCC replacement.  
+**Design:** Sample GT bubbles randomly from all non-saturated images (img_mean < 150) to cover multiple photometric regimes and bubble morphologies. For each bubble: measure max scale-normalized LoG response within `bubble.radius` at each pyramid level (sensitivity curve). At the correct level, also measure LoG at 20 random background locations > 3×radius from any GT bubble (specificity sample). Script: `scripts/experiments/profile_log_response.py`.
+
+**Known bugs in E10 design (identified in post-hoc review):**
+1. **Saturation filter bug:** `load_image` returns float [0,1], so `img_mean < 150` always passes. All 14/14 images are included regardless of saturation (likely harmless since no truly saturated frames in this set, but the filter never actually ran).
+2. **Asymmetric background sampling:** Bubble metric = `max(|LoG|)` over a disk of radius `bubble.radius`. Background metric = single-pixel `|LoG|` (line 88). A real detector takes the max in a region; single-pixel sampling underestimates the background score a detector would face and inflates SNR.
+3. **Background only measured at delta=0:** No per-scale SNR profile. Whether fine-scale or coarse-scale is more discriminative is unknown.
+4. **Bubble morphology never examined:** The sigma = canonical_r/√2 choice was made for filled-Gaussian-blob theory. Microscopy bubbles may be optically ring-like (bright ring, uniform/dark interior), in which case the center-LoG theory does not apply and sigma = ring_wall_width/√2 is the correct choice, independent of ring radius.
+
+**Result:**
+```
+Non-saturated images: 14/14 (see bug 1)
+Bubbles profiled: 55
+Background samples: 1045
+
+delta   mean_|LoG|   median   n_valid
+  -6      0.1355     0.1219      45   ← HIGHEST
+  -5      0.1329     0.1174      45
+  -4      0.1300     0.1151      48
+  -3      0.1246     0.1133      52
+  -2      0.1199     0.1098      54
+  -1      0.1152     0.1047      55
+  +0      0.1112     0.0949      55   ← correct level
+  +1      0.1054     0.0930      55
+  +2      0.0988     0.0950      55
+  +3      0.0932     0.0935      51
+  +4      0.0873     0.0829      49
+  +5      0.0809     0.0748      48
+  +6      0.0746     0.0671      48
+
+Peak delta per bubble: mean=-2.76, median=-5.0, p25=-6.0, p75=0.0
+
+Bubble |LoG| at delta=0: mean=0.1112, median=0.0949
+Background |LoG| at delta=0: mean=0.0193, median=0.0095  (single-pixel, inflated SNR)
+SNR at delta=0: 5.77× (overestimate due to asymmetric sampling)
+```
+Auto-verdict: **FALSIFIED (sensitivity)** — median peak = -5.0, far from delta=0.
+
+**Critical analysis (reviewed with PAL, consensus reached):**
+
+The auto-verdict is **correct for what was measured but incorrect about what was measured.** The measurement conflates two hypotheses:
+- **H1 (scale-selectivity via max-in-region):** Falsified. The monotone curve is a measurement artifact, not a property of LoG.
+- **H2 (LoG discriminability at delta=0):** NOT tested by the auto-verdict. 5.77× SNR is a real signal, though inflated by asymmetric sampling.
+
+**Mechanistic explanation of monotone curve:** `max(|LoG|)` inside a disk with FIXED sigma=3.54px produces a monotone response by construction. At delta=-6, bubble subtends 8.84px in the scaled image (sigma/r ≈ 0.40 — edge-detection regime): the LoG picks up the sharp circular bubble boundary ring, not the blob interior. At delta=+6, sigma >> bubble_r_in_scaled — the blob is over-smoothed and |LoG| collapses. There is no pyramid level where the measurement switches from edge-response to blob-response; the max-in-disk always returns the dominant local feature, which is the edge at fine scales. LoG blob-detection theory (center response peaks at sigma = r/√2, i.e., delta=0) was never actually measured.
+
+**LoG blob theory is also contingent on bubble morphology.** If bubbles are ring-like (gas-liquid interface → bright ring, dark interior), the optimal sigma is ring_wall_width/√2, not ring_radius/√2. The center LoG would be near zero at all scales for a ring-shaped bubble. E11 with center sampling would also see a monotone decline in that case — not because LoG fails, but because the physical model is wrong.
+
+**Conclusion:** E10 is inconclusive. It does not falsify LoG as a feature; it falsifies a specific (flawed) measurement protocol. The 5.77× SNR at delta=0 is a positive preliminary signal. Before designing E11, two prerequisite questions must be answered: (1) Are bubbles filled disks or ring-like in this imaging modality? (2) Does background LoG grow at finer scales (degrading SNR), or stay proportional?
+
+**Path to E11:**
+1. Plot intensity cross-sections across ~10 GT bubbles across sizes (20 min) — determines filled vs. ring morphology and correct LoG model.
+2. Re-run with (a) center-pixel LoG curve vs. delta, (b) symmetric background measurement (`max(|LoG|)` in small region), (c) background measured at ALL delta levels to expose SNR(delta).
+3. If bubble is ring-like, test sigma tuned to ring width rather than ring radius.
+4. Only then declare LoG viable or falsified.
+
+---
+
+## Open Experiments (pending)
+
+### E11 · Bubble morphology cross-section + corrected LoG discriminability test
+**Prerequisite for LoG viability.** E10 was inconclusive because (a) the measurement protocol conflated blob vs. edge detection and (b) the bubble morphology was never verified — LoG blob theory (sigma = r/√2) assumes filled Gaussian disks, but microscopy bubbles may be ring-like (gas-liquid interface: bright ring, dark interior), in which case sigma = ring_wall_width/√2 is correct regardless of ring radius.
+
+**Step 1 — Morphology survey (prerequisite):**  
+Plot horizontal and vertical intensity cross-sections through ~10 GT bubble centers across 3 size bins (small, medium, large) and at least 2 photometric regimes. Classify each as (A) filled dark disc, (B) dark-rim / bright-interior ring, (C) bright-rim / dark-interior ring, or (D) indeterminate. Record the rim width for any ring-type bubble.  
+
+**Step 2 — Corrected LoG discriminability (E11 proper):**  
+Using the morphology result to select sigma(s) to test:
+- Sensitivity: LoG at **bubble center pixel** (not max-over-region) vs. delta — tests whether the center-pixel LoG genuinely peaks at delta=0
+- Background: `max(|LoG|)` over a small disk (symmetric with the bubble metric, e.g. radius=3px) at 20 random background locations — removes the asymmetric-sampling inflation from E10
+- Background measured at **all delta levels** — exposes whether fine-scale background LoG also increases (degrading SNR) or stays low (SNR improves or stays constant)
+- Image filter fixed to `img.mean() < 0.6` (float image threshold)
+
+**Falsification criteria:**
+1. Center-pixel sensitivity monotone at ALL tested sigma values → LoG cannot form a scale-space peak; investigate Hough or radial-symmetry detectors instead
+2. Center-pixel peak near delta=0 but SNR(delta) curve flat or worse than 2× at delta=0 → specificity fails regardless of sigma tuning
+3. Center-pixel peak near delta=0 AND SNR(delta=0) ≥ 2× with symmetric background → LoG viable; proceed to pipeline integration
+
+Script: `scripts/experiments/profile_log_e11.py` (to be written).

@@ -1,0 +1,3 @@
+- **Before reaching a conclusion, consult pal mcp clink claude for an independent, critical opinion**. Dont take their word for granted, neither your conclusions as ground truth. Critically assess all evidence before falsifying an hypothesis
+- Always update docs/experiments with new hypothesis to falsify, as well as conclusions reached AFTER concensus with pal mcp clink claude.
+- Adhere to \scientific-critical-thinking when devising new hypothesis. Never be a 'pleaser', be always critical and honest.
