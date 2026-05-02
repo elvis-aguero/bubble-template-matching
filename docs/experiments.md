@@ -91,15 +91,21 @@ PAL also flagged that `_iou()` uses square boxes, making the delta=±3 suppressi
 **Why:** PAL E7 predicted the NCC peak falls at delta=−2 to −3 (the template encodes an effective canonical radius of ~3.5–4px). If confirmed, adjusting `template_context_factor` to realign the scale could be a low-cost fix.  
 **What:** For 39 GT bubbles sampled evenly across log-radius space, computed the maximum NCC score within `bubble.radius` at each of 27 pyramid levels. Recorded mean score per delta and the delta at which each bubble's curve peaks. Script: `scripts/profile_ncc_response.py`.  
 **Result:** Mean NCC score is monotonically decreasing from fine to coarse: 0.592 at delta=−6, 0.469 at delta=0, 0.320 at delta=+6. There is no peak — the curve is a downward slope across the entire ±6 delta range (slope ≈ −0.023 per level). Median peak delta = −4.0 (14 of 39 bubbles peak at delta=−6, the finest level measured).  
-**Conclusion:** PAL's "offset by 2–3 levels" hypothesis is superseded by a more severe finding: NCC has **no scale-selective peak at all**. Finer scales always score higher due to higher image resolution, regardless of bubble size or template alignment. Adjusting `context_factor` cannot fix a monotone slope — there is no scale to realign to. The cross-scale NMS approach with raw NCC scores is structurally broken: it will always select the finest viable scale, not the correct one. The fix requires either a scale-selective feature (LoG/DoG) or abandoning cross-scale NMS in favour of per-level independent counting (O2).
+**Conclusion:** PAL's "offset by 2–3 levels" hypothesis is superseded by a more severe finding: NCC has **no scale-selective peak at all**. Finer scales always score higher due to higher image resolution, regardless of bubble size or template alignment. Adjusting `context_factor` cannot fix a monotone slope — there is no scale to realign to. The cross-scale NMS approach with raw NCC scores is structurally broken: it will always select the finest viable scale, not the correct one. The fix requires a scale-selective feature (LoG/DoG) that produces a genuine peak at the correct scale.
+
+---
+
+---
+
+### E9 · O2 — Per-level independent NMS (no cross-scale competition)
+**Why:** If cross-scale NMS is the mechanism evicting correct-level peaks, removing it should allow all correct-level peaks to survive and be scored by their per-level calibrator.  
+**What:** Set `nms_iou_threshold=0.0`. Retrained `_train_per_level()` on raw per-level LMs: for each pyramid level, raw LMs are labeled positive if within `bubble.radius` of a GT bubble whose correct level is that level; all other raw LMs become negatives. Prediction: each level runs independent 2D NMS, and each level's calibrator accumulates P(bubble) independently. Script: `scripts/run_o2.py`.  
+**Result:** relL1 = 23.080. pred_total = 11,847 vs gt_total = 492 (24× over-prediction). Fine-scale levels each contribute 600–1,600 predicted bubbles against near-zero ground truth. The per-level calibrators at fine scales (levels 0–7, eff_r 3–7px) correctly assign high P(bubble) to high-NCC peaks — but there are ~1,000 such peaks per level because NCC gives high scores to edge artifacts at every scale regardless of whether a bubble is present.  
+**Conclusion:** Hypothesis falsified. Per-level independent NMS makes the problem catastrophically worse. Cross-scale NMS was the only mechanism suppressing the thousands of fine-scale edge artifact peaks. Without it, each fine-level calibrator (which cannot distinguish edge artifacts from real small bubbles at the same NCC score) independently contributes massive over-counting. This reinforces E8: NCC has no scale selectivity, so removing cross-scale competition does not expose a latent correct-scale signal — it unleashes every scale's spurious detections. The pipeline requires a genuinely scale-selective feature before any counting approach can work.
 
 ---
 
 ## Open Experiments (pending)
-
-### O2 · Per-level independent NMS (no cross-scale competition)
-**Hypothesis:** Removing cross-scale IoU suppression eliminates scale bias from NMS. Each level runs its own spatial NMS independently; the calibrator is trained on per-level raw LMs, breaking the circular dependency.  
-**Falsification:** Set `nms_iou_threshold=0.0`, retrain the calibrator on per-level raw LMs, measure relL1. If relL1 does not improve substantially, per-level NMS alone is insufficient.
 
 ### O3 · Scale-specific templates (`num_templates > 1`)
 **Hypothesis:** A single averaged template blurs scale-specific appearance across a 15× size range. Separate templates per size bin should narrow the NCC ridge in scale space, making the correct-level peak more discriminative relative to adjacent-level competitors.  

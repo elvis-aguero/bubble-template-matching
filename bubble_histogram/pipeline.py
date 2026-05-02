@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from bubble_histogram.calibration import ScoreCalibrator, nms_3d, sample_scores
+from bubble_histogram.calibration import ScoreCalibrator, _local_maxima, _lm_min_dist, nms_3d, sample_scores
 from bubble_histogram.config import PipelineConfig
 from bubble_histogram.data import AnnotatedDataset
 from bubble_histogram.ncc import compute_ncc_maps
@@ -47,20 +47,26 @@ class BubblePipeline:
 
     def _train_per_level(self, dataset: AnnotatedDataset) -> None:
         """
-        Per-level calibration with scale-aware positive labeling.
+        Per-level calibration.  Training population depends on nms_iou_threshold:
 
-        A survivor is labeled positive only if it is both spatially close to an
-        annotation (dist < bubble.radius) AND at the correct pyramid level for that
-        annotation (argmin |eff_radius - bubble.radius|).  This prevents edge
-        artifacts from fine scales (which score higher than correct-scale center
-        detections) from consuming GT slots in the greedy matcher and being labeled
-        positive.  Each level then has its own prior and calibrator, so level 0
-        (almost zero true positives) gets P(bubble) ≈ 0 while the correct-scale
-        levels get a realistic prior.
+        > 0 (cross-scale NMS mode, E1): train on NMS survivors; label positive only
+            when at the correct pyramid level AND within bubble.radius of a GT
+            annotation.  Scale bias in NMS means only ~12% of GT bubbles contribute
+            positives.
+
+        == 0 (per-level NMS mode, O2): train on raw per-level local maxima.  A raw
+            LM at level lv is positive iff within bubble.radius of a GT bubble whose
+            correct level is lv; all other LMs at lv are negative.  Fine-scale
+            aliases of larger bubbles land as negatives at fine levels, teaching the
+            calibrator to suppress them.  Negatives are capped at
+            neg_sample_ratio × n_pos to avoid overwhelming the calibrator.
         """
         level_pos: dict[int, list[float]] = defaultdict(list)
         level_neg: dict[int, list[float]] = defaultdict(list)
-        n_levels = 0  # determined from ncc_results after first image
+        n_levels = 0
+        use_raw_lm = (self.config.nms_iou_threshold == 0.0)
+        rng = np.random.default_rng(seed=42) if use_raw_lm else None
+        min_d = _lm_min_dist(self.config)
 
         for image_path in dataset.calibration_images:
             sample = dataset.load_sample(image_path)
@@ -69,27 +75,70 @@ class BubblePipeline:
                 continue
             n_levels = max(n_levels, len(ncc_results))
             eff_radii = np.array([er for er, _ in ncc_results])
-            survivors = nms_3d(ncc_results, self.config)
 
             gt = [(b.cy, b.cx, b.radius) for b in sample.bubbles]
-            # correct pyramid level for each GT bubble
             gt_levels = [int(np.argmin(np.abs(eff_radii - r))) for _, _, r in gt]
-            matched_gt: set[int] = set()
 
-            for score, level_idx, y, x, _ in survivors:
-                best_i, best_d = -1, float("inf")
+            if use_raw_lm:
+                # O2: iterate raw LMs per level, label against correct-level GT only
+                gt_by_level: dict[int, list] = defaultdict(list)
                 for i, (cy, cx, r) in enumerate(gt):
-                    if i in matched_gt:
+                    gt_by_level[gt_levels[i]].append((cy, cx, r))
+
+                for lv, (eff_r, score_map) in enumerate(ncc_results):
+                    alpha = self.config.template_size / (2.0 * self.config.template_context_factor * eff_r)
+                    peaks = _local_maxima(score_map, min_d)
+                    if len(peaks) == 0:
                         continue
-                    d = math.sqrt((y - cy) ** 2 + (x - cx) ** 2)
-                    # scale-aware: only count as positive at the correct pyramid level
-                    if d < r and level_idx == gt_levels[i] and d < best_d:
-                        best_d, best_i = d, i
-                if best_i >= 0:
-                    matched_gt.add(best_i)
-                    level_pos[level_idx].append(score)
-                else:
-                    level_neg[level_idx].append(score)
+                    scores_lv = score_map[peaks[:, 0], peaks[:, 1]]
+                    ys = peaks[:, 0] / alpha
+                    xs = peaks[:, 1] / alpha
+
+                    level_gt = gt_by_level.get(lv, [])
+                    matched_lv: set[int] = set()
+                    lv_pos: list[float] = []
+                    lv_neg: list[float] = []
+
+                    for k in np.argsort(scores_lv)[::-1]:
+                        y, x, sc = float(ys[k]), float(xs[k]), float(scores_lv[k])
+                        best_i, best_d = -1, float("inf")
+                        for i, (cy, cx, r) in enumerate(level_gt):
+                            if i in matched_lv:
+                                continue
+                            d = math.sqrt((y - cy) ** 2 + (x - cx) ** 2)
+                            if d < r and d < best_d:
+                                best_d, best_i = d, i
+                        if best_i >= 0:
+                            matched_lv.add(best_i)
+                            lv_pos.append(sc)
+                        else:
+                            lv_neg.append(sc)
+
+                    level_pos[lv].extend(lv_pos)
+                    max_neg = max(len(lv_pos) * self.config.neg_sample_ratio, 50)
+                    if len(lv_neg) > max_neg:
+                        idx = rng.choice(len(lv_neg), size=max_neg, replace=False)
+                        lv_neg = [lv_neg[j] for j in idx]
+                    level_neg[lv].extend(lv_neg)
+
+            else:
+                # E1: NMS survivors with scale-aware positive labeling
+                survivors = nms_3d(ncc_results, self.config)
+                matched_gt: set[int] = set()
+
+                for score, level_idx, y, x, _ in survivors:
+                    best_i, best_d = -1, float("inf")
+                    for i, (cy, cx, r) in enumerate(gt):
+                        if i in matched_gt:
+                            continue
+                        d = math.sqrt((y - cy) ** 2 + (x - cx) ** 2)
+                        if d < r and level_idx == gt_levels[i] and d < best_d:
+                            best_d, best_i = d, i
+                    if best_i >= 0:
+                        matched_gt.add(best_i)
+                        level_pos[level_idx].append(score)
+                    else:
+                        level_neg[level_idx].append(score)
 
         # Flatten for the score-histogram artifact
         all_pos = np.array([s for ss in level_pos.values() for s in ss], dtype=np.float32)
@@ -173,13 +222,21 @@ class BubblePipeline:
                 radius_px.append(eff_radius)
         else:
             # Per-level 2D NMS: peaks found independently at each scale (no cross-scale suppression)
-            for eff_radius, score_map in ncc_results:
+            use_per_level_cal = self.calibrators is not None
+            for i, (eff_radius, score_map) in enumerate(ncc_results):
                 if use_lm:
                     peaks = _local_maxima(score_map, min_d)
                     scores = score_map[peaks[:, 0], peaks[:, 1]] if len(peaks) else np.array([])
                 else:
                     scores = score_map.ravel()  # dense: every pixel contributes (not recommended)
-                probs = self.calibrator.predict(scores) if len(scores) else np.array([])
+                if len(scores):
+                    if use_per_level_cal:
+                        cal = self.calibrators.get(i)
+                        probs = cal.predict(scores) if cal is not None else np.zeros(len(scores), dtype=np.float32)
+                    else:
+                        probs = self.calibrator.predict(scores)
+                else:
+                    probs = np.array([])
                 expected_counts.append(float(probs.sum()))
                 radius_px.append(eff_radius)
 
