@@ -14,13 +14,15 @@ OUTPUT (saved to --output-dir, default: plots/)
   calibration.png  — P(bubble|NCC score) vs score; should rise steeply for scores > 0.3
                      and be near zero for negative scores.
   histogram.png    — predicted bubble size histogram for --image (only if --image is given)
+  ncc.png          — NCC score map at the most active pyramid level (only if --image is given)
+  top_matches.png  — top-100 NCC peaks after 3D NMS drawn as bounding boxes (only if --image is given)
 
 QUICK START
 -----------
   # Inspect a trained pipeline (no image needed for template + calibration plots)
   python scripts/visualize.py output/pipeline.pkl
 
-  # Also plot the size histogram for a specific frame
+  # Also plot the size histogram, NCC map, and top matches for a specific frame
   python scripts/visualize.py output/pipeline.pkl --image seed_v04/images/some_frame.png
 
   # Save to a custom directory
@@ -80,14 +82,21 @@ def main():
         fig.savefig(args.output_dir / "calibration.png", dpi=150, bbox_inches="tight")
         print("Saved calibration.png")
 
-    # 3. Per-frame histogram (if image provided)
+    # 3. Per-frame artifacts (if image provided)
     if args.image:
         img = load_image(args.image)
         result = pipeline.predict(img)
+
         fig, ax = plt.subplots(figsize=(8, 4))
         plot_histogram(result, ax=ax, title=f"Histogram: {args.image.name}")
         fig.savefig(args.output_dir / "histogram.png", dpi=150, bbox_inches="tight")
         print("Saved histogram.png")
+
+        pipeline.save_ncc_png(args.output_dir / "ncc.png", img)
+        print("Saved ncc.png")
+
+        pipeline.save_top_matches_png(args.output_dir / "top_matches.png", img, top_n=100)
+        print("Saved top_matches.png")
 
     plt.close("all")
 

@@ -1,7 +1,6 @@
 import math
 import cv2
 import numpy as np
-from skimage.feature import match_template
 
 from bubble_histogram.config import PipelineConfig
 
@@ -110,10 +109,12 @@ def compute_ncc_maps(
         tmpl_idx = 0 if n_bins == 1 else _assign_template(eff_radius, bin_centers)
         T = templates[tmpl_idx]
 
-        # match_template computes C[y,x] = dot(W[y,x] / ||W[y,x]||, T) at every location
-        # pad_input=True keeps the output the same size as the input (otherwise it shrinks by template_size-1)
-        # mode="reflect" pads the border by mirroring pixel values — avoids edge artifacts
-        score_map = match_template(scaled_img, T, pad_input=True, mode="reflect")
+        # cv2.TM_CCOEFF_NORMED is ZNCC (zero-mean NCC), identical to skimage's match_template.
+        # We pad manually with reflect (BORDER_REFLECT_101 = numpy 'reflect', excludes border pixel)
+        # so the output stays the same shape as the input — equivalent to pad_input=True.
+        pad = ts // 2
+        padded = cv2.copyMakeBorder(scaled_img, pad, pad, pad, pad, cv2.BORDER_REFLECT_101)
+        score_map = cv2.matchTemplate(padded, T, cv2.TM_CCOEFF_NORMED)
         results.append((eff_radius, score_map.astype(np.float32)))
 
     return results  # one (radius, score_map) pair per pyramid level = one per histogram bin

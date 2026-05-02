@@ -1,9 +1,11 @@
+import math
 import pickle
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 
-from bubble_histogram.calibration import ScoreCalibrator, count_local_maxima, sample_scores
+from bubble_histogram.calibration import ScoreCalibrator, nms_3d, sample_scores
 from bubble_histogram.config import PipelineConfig
 from bubble_histogram.data import AnnotatedDataset
 from bubble_histogram.ncc import compute_ncc_maps
@@ -43,26 +45,24 @@ class BubblePipeline:
         self._pos_scores = pos_scores
         self._neg_scores = neg_scores
 
-        # estimate the prior: fraction of pixel locations that contain a bubble centre
-        # this is used as P(bubble) in Bayes' rule: P(bubble|score) ∝ P(score|bubble) * prior
-        total_bubbles = 0
-        total_locs = 0
-        for p in dataset.calibration_images:
-            sample = dataset.load_sample(p)
-            total_bubbles += len(sample.bubbles)
-            if self.config.local_maxima_calibration:
-                # if calibrator was trained on LM scores, the prior denominator should also be n_local_maxima
-                ncc_r = compute_ncc_maps(sample.image, self.templates, self.config)
-                total_locs += count_local_maxima(ncc_r, self.config)
-            else:
-                total_locs += int(np.prod(sample.image.shape))  # default: prior = n_bubbles / n_pixels
-
-        prior = total_bubbles / max(total_locs, 1)  # guard against division by zero
+        # estimate the prior: P(bubble) at a candidate location
+        if self.config.local_maxima_calibration:
+            # sample_scores labeled every NMS survivor pos or neg;
+            # prior = P(bubble | at NMS survivor) = n_pos / (n_pos + n_neg)
+            # No extra NCC passes needed — derived directly from training counts.
+            prior = len(pos_scores) / max(len(pos_scores) + len(neg_scores), 1)
+        else:
+            # default: prior = n_bubbles / n_pixels (fraction of pixel locations that are bubbles)
+            total_bubbles = sum(len(dataset.load_sample(p).bubbles)
+                                for p in dataset.calibration_images)
+            total_pixels = sum(int(np.prod(dataset.load_sample(p).image.shape))
+                               for p in dataset.calibration_images)
+            prior = total_bubbles / max(total_pixels, 1)
 
         self.calibrator = ScoreCalibrator(n_bins=self.config.n_score_bins)
         self.calibrator.fit(pos_scores, neg_scores, prior)
 
-    def predict(self, image: np.ndarray) -> dict[str, list[float]]:
+    def predict(self, image: np.ndarray, ncc_results: list | None = None) -> dict[str, list[float]]:
         """
         Estimate bubble size histogram for a single image.
 
@@ -75,13 +75,13 @@ class BubblePipeline:
         if self.templates is None or self.calibrator is None:
             raise RuntimeError("Pipeline must be trained before calling predict.")
 
-        ncc_results = compute_ncc_maps(image, self.templates, self.config)
+        if ncc_results is None:
+            ncc_results = compute_ncc_maps(image, self.templates, self.config)
 
         radius_px = []
         expected_counts = []
 
-        from skimage.feature import peak_local_max
-        from bubble_histogram.calibration import nms_3d
+        from bubble_histogram.calibration import nms_3d, _local_maxima
         min_d = 2   # minimum pixel distance between local maxima; small because NCC response is smooth
 
         use_lm = self.config.predict_local_maxima or self.config.local_maxima_calibration
@@ -102,7 +102,7 @@ class BubblePipeline:
             # Per-level 2D NMS: peaks found independently at each scale (no cross-scale suppression)
             for eff_radius, score_map in ncc_results:
                 if use_lm:
-                    peaks = peak_local_max(score_map, min_distance=min_d, exclude_border=False)
+                    peaks = _local_maxima(score_map, min_d)
                     scores = score_map[peaks[:, 0], peaks[:, 1]] if len(peaks) else np.array([])
                 else:
                     scores = score_map.ravel()  # dense: every pixel contributes (not recommended)
@@ -190,6 +190,7 @@ class BubblePipeline:
         path: Path,
         image: np.ndarray,
         top_n: int = 100,
+        ncc_results: list | None = None,
     ) -> None:
         """
         Save original image annotated with the top-N highest-scoring peaks
@@ -204,7 +205,8 @@ class BubblePipeline:
         import matplotlib.patches as mpatches
         from bubble_histogram.calibration import nms_3d
 
-        ncc_results = compute_ncc_maps(image, self.templates, self.config)
+        if ncc_results is None:
+            ncc_results = compute_ncc_maps(image, self.templates, self.config)
         if not ncc_results:
             return
 
@@ -242,7 +244,12 @@ class BubblePipeline:
         fig.savefig(path, dpi=150, bbox_inches="tight")
         plt.close(fig)
 
-    def save_pr_curve_png(self, path: Path, samples: list) -> None:
+    def save_pr_curve_png(
+        self,
+        path: Path,
+        samples: list,
+        precomputed_ncc: list | None = None,
+    ) -> None:
         """
         Save a precision-recall curve PNG evaluated on the given samples.
 
@@ -250,6 +257,9 @@ class BubblePipeline:
         positive if its centre lands within the annotated bubble's radius of any
         unmatched annotation (greedy, highest-score first).  The curve is pooled
         across all samples; AP is computed as the area under the interpolated curve.
+
+        precomputed_ncc : optional list of ncc_results (one per sample) to avoid
+                          recomputing NCC maps when they were already computed by the caller.
         """
         import matplotlib
         matplotlib.use("Agg")
@@ -259,8 +269,10 @@ class BubblePipeline:
         all_detections: list[tuple[float, bool]] = []   # (score, is_tp)
         total_gt = 0
 
-        for sample in samples:
-            ncc_results = compute_ncc_maps(sample.image, self.templates, self.config)
+        for idx, sample in enumerate(samples):
+            ncc_results = (precomputed_ncc[idx]
+                           if precomputed_ncc is not None
+                           else compute_ncc_maps(sample.image, self.templates, self.config))
             if not ncc_results:
                 continue
 
@@ -307,7 +319,7 @@ class BubblePipeline:
         rec  = np.array([0.0] + recalls   + [recalls[-1]], dtype=np.float64)
         for i in range(len(prec) - 2, -1, -1):
             prec[i] = max(prec[i], prec[i + 1])
-        ap = float(np.trapz(prec, rec))
+        ap = float(np.trapezoid(prec, rec))
 
         fig, ax = plt.subplots(figsize=(7, 5))
         ax.plot(recalls, precisions, color="steelblue", linewidth=1.5)
@@ -326,17 +338,18 @@ class BubblePipeline:
         fig.savefig(path, dpi=150, bbox_inches="tight")
         plt.close(fig)
 
-    def save_ncc_png(self, path: Path, image: np.ndarray) -> None:
+    def save_ncc_png(self, path: Path, image: np.ndarray, ncc_results: list | None = None) -> None:
         """Public wrapper — save NCC score map for a given image."""
-        self._save_ncc_png(path, image)
+        self._save_ncc_png(path, image, ncc_results=ncc_results)
 
-    def _save_ncc_png(self, path: Path, image: np.ndarray) -> None:
+    def _save_ncc_png(self, path: Path, image: np.ndarray, ncc_results: list | None = None) -> None:
         """Save original image alongside NCC score map at the most populated scale level."""
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        ncc_results = compute_ncc_maps(image, self.templates, self.config)
+        if ncc_results is None:
+            ncc_results = compute_ncc_maps(image, self.templates, self.config)
         if not ncc_results:
             return
 

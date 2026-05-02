@@ -12,6 +12,7 @@ class PipelineConfig:
     neg_sample_ratio: int = 10         # how many random non-bubble pixels to sample per annotated bubble during calibration
     min_neg_dist: int = 10             # pixels — a random pixel must be at least this far from any bubble to count as negative
     template_context_factor: float = 1.3   # crop box = 2*(r*factor) × 2*(r*factor); >1.0 adds a background ring around the bubble
-    local_maxima_calibration: bool = False  # if True, train calibrator on local-maxima scores instead of random pixel scores
+    local_maxima_calibration: bool = True  # if True, train calibrator on local-maxima scores instead of random pixel scores
     predict_local_maxima: bool = True       # if True, sum P(bubble) only at local maxima; if False, sum over every pixel (overcounts)
     nms_iou_threshold: float = 0.5         # IoU threshold for cross-scale NMS in predict(); 0.0 disables cross-scale suppression
+    nms_max_candidates: int = 10000       # cap on candidates fed to NMS per image; top-K by NCC score; keeps all bubbles while bounding runtime

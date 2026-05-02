@@ -48,6 +48,7 @@ import numpy as np
 from bubble_histogram.config import PipelineConfig
 from bubble_histogram.data import AnnotatedDataset
 from bubble_histogram.histogram import plot_histogram
+from bubble_histogram.ncc import compute_ncc_maps
 from bubble_histogram.pipeline import BubblePipeline
 
 
@@ -129,24 +130,29 @@ def main():
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
+        print(f"Generating artifacts for {len(test_paths)} test image(s)...")
         test_samples = []
+        test_ncc: list = []
         for p in test_paths:
+            print(f"  Processing {p.name}...")
             sample = ds.load_sample(p)
             test_samples.append(sample)
-            result = pipeline.predict(sample.image)
+            ncc_results = compute_ncc_maps(sample.image, pipeline.templates, pipeline.config)
+            test_ncc.append(ncc_results)
+            result = pipeline.predict(sample.image, ncc_results=ncc_results)
 
             # NCC score map — prefixed with TEST_ so it's clearly distinct
             ncc_out = args.output.with_name(
                 f"{args.output.stem}_ncc_TEST_{p.stem[:40]}.png"
             )
-            pipeline.save_ncc_png(ncc_out, sample.image)
+            pipeline.save_ncc_png(ncc_out, sample.image, ncc_results=ncc_results)
             print(f"Test NCC map saved to {ncc_out}")
 
             # Top-100 3D-NMS matches with bounding boxes
             matches_out = args.output.with_name(
                 f"{args.output.stem}_top_matches_TEST_{p.stem[:40]}.png"
             )
-            pipeline.save_top_matches_png(matches_out, sample.image, top_n=100)
+            pipeline.save_top_matches_png(matches_out, sample.image, top_n=100, ncc_results=ncc_results)
             print(f"Top matches saved to {matches_out}")
 
             # Bin annotated radii into the same pyramid-level bins
@@ -174,7 +180,7 @@ def main():
             print(f"Size histogram saved to {hist_out}")
 
         pr_out = args.output.with_name(f"{args.output.stem}_pr_curve.png")
-        pipeline.save_pr_curve_png(pr_out, test_samples)
+        pipeline.save_pr_curve_png(pr_out, test_samples, precomputed_ncc=test_ncc)
         print(f"PR curve saved to {pr_out}")
 
 
