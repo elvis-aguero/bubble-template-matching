@@ -67,11 +67,15 @@ def build_templates(
             interp = cv2.INTER_AREA if patch.shape[0] >= ts else cv2.INTER_LINEAR
             resized = cv2.resize(patch, (ts, ts), interpolation=interp).astype(np.float32)
 
-            # normalise each patch to sum=1 before averaging so that bright and dark images
-            # contribute equally regardless of their absolute intensity level
-            s = resized.sum()
-            if s > 0:
-                resized /= s
+            # Zero-mean + L2-normalise each patch before averaging.
+            # This preserves the spatial contrast structure (dark bubble interior vs
+            # bright surround) so the averaged template retains discriminative features.
+            # Sum-normalisation was used previously but collapses every patch to ~1/169
+            # per pixel, washing out the dark-disc pattern and making the template flat.
+            resized -= resized.mean()
+            norm_p = np.linalg.norm(resized)
+            if norm_p > 0:
+                resized /= norm_p
 
             bin_patches[bin_idx].append(resized)
 

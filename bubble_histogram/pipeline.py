@@ -28,7 +28,8 @@ class BubblePipeline:
     def __init__(self, config: PipelineConfig):
         self.config = config
         self.templates: np.ndarray | None = None        # shape (n_bins, template_size, template_size)
-        self.calibrator: ScoreCalibrator | None = None  # maps NCC score → P(bubble)
+        self.calibrator: ScoreCalibrator | None = None  # maps NCC score → P(bubble); used when local_maxima_calibration=False
+        self.calibrators: dict[int, ScoreCalibrator] | None = None  # per-level calibrators; used when local_maxima_calibration=True
         self._split_info: dict | None = None            # saved for the *_split.json artifact
         self._pos_scores: np.ndarray | None = None      # saved for the *_score_histograms.png artifact
         self._neg_scores: np.ndarray | None = None
@@ -39,28 +40,95 @@ class BubblePipeline:
         self.templates = build_templates(dataset, self.config,
                                          image_paths=dataset.template_images)
 
-        # sample NCC scores from the calibration split (separate from template images)
+        if self.config.local_maxima_calibration:
+            self._train_per_level(dataset)
+        else:
+            self._train_global(dataset)
+
+    def _train_per_level(self, dataset: AnnotatedDataset) -> None:
+        """
+        Per-level calibration with scale-aware positive labeling.
+
+        A survivor is labeled positive only if it is both spatially close to an
+        annotation (dist < bubble.radius) AND at the correct pyramid level for that
+        annotation (argmin |eff_radius - bubble.radius|).  This prevents edge
+        artifacts from fine scales (which score higher than correct-scale center
+        detections) from consuming GT slots in the greedy matcher and being labeled
+        positive.  Each level then has its own prior and calibrator, so level 0
+        (almost zero true positives) gets P(bubble) ≈ 0 while the correct-scale
+        levels get a realistic prior.
+        """
+        level_pos: dict[int, list[float]] = defaultdict(list)
+        level_neg: dict[int, list[float]] = defaultdict(list)
+        n_levels = 0  # determined from ncc_results after first image
+
+        for image_path in dataset.calibration_images:
+            sample = dataset.load_sample(image_path)
+            ncc_results = compute_ncc_maps(sample.image, self.templates, self.config)
+            if not ncc_results:
+                continue
+            n_levels = max(n_levels, len(ncc_results))
+            eff_radii = np.array([er for er, _ in ncc_results])
+            survivors = nms_3d(ncc_results, self.config)
+
+            gt = [(b.cy, b.cx, b.radius) for b in sample.bubbles]
+            # correct pyramid level for each GT bubble
+            gt_levels = [int(np.argmin(np.abs(eff_radii - r))) for _, _, r in gt]
+            matched_gt: set[int] = set()
+
+            for score, level_idx, y, x, _ in survivors:
+                best_i, best_d = -1, float("inf")
+                for i, (cy, cx, r) in enumerate(gt):
+                    if i in matched_gt:
+                        continue
+                    d = math.sqrt((y - cy) ** 2 + (x - cx) ** 2)
+                    # scale-aware: only count as positive at the correct pyramid level
+                    if d < r and level_idx == gt_levels[i] and d < best_d:
+                        best_d, best_i = d, i
+                if best_i >= 0:
+                    matched_gt.add(best_i)
+                    level_pos[level_idx].append(score)
+                else:
+                    level_neg[level_idx].append(score)
+
+        # Flatten for the score-histogram artifact
+        all_pos = np.array([s for ss in level_pos.values() for s in ss], dtype=np.float32)
+        all_neg = np.array([s for ss in level_neg.values() for s in ss], dtype=np.float32)
+        self._pos_scores, self._neg_scores = all_pos, all_neg
+
+        # Fit one calibrator per level.  Use fewer bins than the global calibrator
+        # because per-level positive counts can be very small (O(tens) per level).
+        bins_per_level = max(10, self.config.n_score_bins // 3)
+        self.calibrators = {}
+        for lv in range(n_levels):
+            p = np.array(level_pos.get(lv, []), dtype=np.float32)
+            n = np.array(level_neg.get(lv, []), dtype=np.float32)
+            prior = len(p) / max(len(p) + len(n), 1)
+            cal = ScoreCalibrator(n_bins=bins_per_level)
+            cal.fit(p, n, prior)
+            self.calibrators[lv] = cal
+
+        # Keep a global calibrator fitted for backwards compat (test assertions, score histogram)
+        global_prior = len(all_pos) / max(len(all_pos) + len(all_neg), 1)
+        self.calibrator = ScoreCalibrator(n_bins=self.config.n_score_bins)
+        self.calibrator.fit(all_pos, all_neg, global_prior)
+
+    def _train_global(self, dataset: AnnotatedDataset) -> None:
+        """Global calibration (local_maxima_calibration=False): centroid-based positives + random pixel negatives."""
         pos_scores, neg_scores = sample_scores(dataset, self.templates, self.config,
                                                image_paths=dataset.calibration_images)
         self._pos_scores = pos_scores
         self._neg_scores = neg_scores
 
-        # estimate the prior: P(bubble) at a candidate location
-        if self.config.local_maxima_calibration:
-            # sample_scores labeled every NMS survivor pos or neg;
-            # prior = P(bubble | at NMS survivor) = n_pos / (n_pos + n_neg)
-            # No extra NCC passes needed — derived directly from training counts.
-            prior = len(pos_scores) / max(len(pos_scores) + len(neg_scores), 1)
-        else:
-            # default: prior = n_bubbles / n_pixels (fraction of pixel locations that are bubbles)
-            total_bubbles = sum(len(dataset.load_sample(p).bubbles)
-                                for p in dataset.calibration_images)
-            total_pixels = sum(int(np.prod(dataset.load_sample(p).image.shape))
-                               for p in dataset.calibration_images)
-            prior = total_bubbles / max(total_pixels, 1)
+        total_bubbles = sum(len(dataset.load_sample(p).bubbles)
+                            for p in dataset.calibration_images)
+        total_pixels = sum(int(np.prod(dataset.load_sample(p).image.shape))
+                           for p in dataset.calibration_images)
+        prior = total_bubbles / max(total_pixels, 1)
 
         self.calibrator = ScoreCalibrator(n_bins=self.config.n_score_bins)
         self.calibrator.fit(pos_scores, neg_scores, prior)
+        self.calibrators = None
 
     def predict(self, image: np.ndarray, ncc_results: list | None = None) -> dict[str, list[float]]:
         """
@@ -81,7 +149,7 @@ class BubblePipeline:
         radius_px = []
         expected_counts = []
 
-        from bubble_histogram.calibration import nms_3d, _local_maxima
+        from bubble_histogram.calibration import _local_maxima
         min_d = 2   # minimum pixel distance between local maxima; small because NCC response is smooth
 
         use_lm = self.config.predict_local_maxima or self.config.local_maxima_calibration
@@ -92,8 +160,13 @@ class BubblePipeline:
             # This prevents the same bubble from being counted at multiple scale levels.
             survivors = nms_3d(ncc_results, self.config)
             level_probs: dict[int, float] = {i: 0.0 for i in range(len(ncc_results))}
+            use_per_level = self.calibrators is not None
             for score, level_idx, _y, _x, _r in survivors:
-                prob = float(self.calibrator.predict(np.array([score], dtype=np.float32))[0])
+                if use_per_level:
+                    cal = self.calibrators.get(level_idx)
+                    prob = float(cal.predict(np.array([score], dtype=np.float32))[0]) if cal is not None else 0.0
+                else:
+                    prob = float(self.calibrator.predict(np.array([score], dtype=np.float32))[0])
                 level_probs[level_idx] += prob
             for i, (eff_radius, _) in enumerate(ncc_results):
                 expected_counts.append(level_probs[i])
@@ -120,9 +193,9 @@ class BubblePipeline:
     ) -> None:
         path = Path(path)
         with open(path, "wb") as f:
-            # only the three objects needed to run predict() are pickled; diagnostic data is separate
             pickle.dump({"config": self.config, "templates": self.templates,
-                         "calibrator": self.calibrator}, f)
+                         "calibrator": self.calibrator,
+                         "calibrators": self.calibrators}, f)
 
         # Always save templates PNG
         self._save_templates_png(path.with_name(path.stem + "_templates.png"))
@@ -376,4 +449,5 @@ class BubblePipeline:
         pipeline = cls(data["config"])      # reconstruct with the config that was used during training
         pipeline.templates = data["templates"]
         pipeline.calibrator = data["calibrator"]
+        pipeline.calibrators = data.get("calibrators")  # None for pipelines saved before per-level calibration
         return pipeline

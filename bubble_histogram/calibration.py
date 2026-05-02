@@ -177,10 +177,23 @@ def nms_3d(
     if not chunks:
         return []
 
+    # Per-level cap: keep only the top-K peaks within each level before pooling.
+    # Prevents fine-scale levels (which generate many high-scoring edge artifacts)
+    # from monopolising the global nms_max_candidates budget and crowding out
+    # legitimate coarse-scale detections.
+    per_k = getattr(config, "nms_max_candidates_per_level", 0)
+    if per_k > 0:
+        capped: list[np.ndarray] = []
+        for chunk in chunks:
+            if len(chunk) > per_k:
+                top_idx = np.argpartition(chunk[:, 0], -per_k)[-per_k:]
+                capped.append(chunk[top_idx])
+            else:
+                capped.append(chunk)
+        chunks = capped
+
     cands_arr = np.vstack(chunks)                        # (total_candidates, 5)
-    # Sort by score descending and apply top-K cap.
-    # All true bubbles score highly so top-K never drops true positives;
-    # it bounds NMS runtime to O(K²) regardless of image content.
+    # Sort by score descending and apply global top-K cap.
     order = np.argsort(cands_arr[:, 0])[::-1]
     max_k = getattr(config, "nms_max_candidates", 10000)
     order = order[:max_k]
@@ -205,11 +218,12 @@ def nms_3d(
             continue
         kept.append((sc[i], lv[i], cy[i], cx[i], cr[i]))
 
-        # Vectorized IoU against all later unsuppressed candidates
-        rest = np.where(~suppressed)[0]
-        rest = rest[rest > i]
-        if len(rest) == 0:
+        # Vectorized IoU against all later unsuppressed candidates.
+        # Only scan suppressed[i+1:] (half the work on average vs scanning all n).
+        rest_offset = np.nonzero(~suppressed[i + 1:])[0]
+        if len(rest_offset) == 0:
             break
+        rest = rest_offset + i + 1
 
         inter_h = np.maximum(0.0, np.minimum(y1[i], y1[rest]) - np.maximum(y0[i], y0[rest]))
         inter_w = np.maximum(0.0, np.minimum(x1[i], x1[rest]) - np.maximum(x0[i], x0[rest]))

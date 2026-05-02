@@ -15,4 +15,5 @@ class PipelineConfig:
     local_maxima_calibration: bool = True  # if True, train calibrator on local-maxima scores instead of random pixel scores
     predict_local_maxima: bool = True       # if True, sum P(bubble) only at local maxima; if False, sum over every pixel (overcounts)
     nms_iou_threshold: float = 0.5         # IoU threshold for cross-scale NMS in predict(); 0.0 disables cross-scale suppression
-    nms_max_candidates: int = 10000       # cap on candidates fed to NMS per image; top-K by NCC score; keeps all bubbles while bounding runtime
+    nms_max_candidates: int = 50000       # global cap after per-level filtering; set large so the per-level cap dominates
+    nms_max_candidates_per_level: int = 1000  # per-level cap: includes ~top-30% of level LMs so GT bubble peaks survive; limits NMS input to ~27K
