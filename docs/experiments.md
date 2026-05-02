@@ -303,15 +303,69 @@ Three independent failure modes:
 
 ## Open Experiments (pending)
 
-### E12 · Hough circle transform diagnostic
+### E12 · Full-image Hough circle transform diagnostic — FALSIFIED (with scope caveat)
 
-**Hypothesis to falsify:** "Hough circle transform on gradient magnitude produces a per-bubble radius estimate within ≤2 pyramid-levels of the GT correct level for ≥70% of bubbles (r≥8px), with a background false-positive rate of ≤5 per image at that threshold."
+**Hypothesis:** Full-image HoughCircles on per-image contrast-stretched uint8 gradient finds per-bubble radius within ≤2 pyramid levels for ≥70% of GT bubbles (r≥8px), FP/image ≤ 5.
 
-**Motivation:** LoG falsified because no single (location, sigma) spans four morphological classes. Hough operates on gradient magnitude — directly exploits the dark-rim edge structure (dominant morphology, 54%) without requiring a model of the bubble interior. Built-in scale selection via the circle-radius accumulator: the accumulator peak radius is the detection radius, eliminating the scale-pyramid bias problem entirely. Known failure modes (gradient threshold sensitivity, thin rings at fine scale) are tunable and diagnosable.
+**Script:** `scripts/experiments/profile_hough_e12.py`
+
+**Design (as implemented — deviates from spec):** Full-image HoughCircles with param2 sweep {10, 20, 30}, GaussianBlur(5,5), Canny param1=50, dp=1, minDist=8, radius 8–60px. Per-image min/max contrast stretch. GT match: nearest circle within 0.5×r_gt. FP: no GT within 3×r_detected.
+
+**Note on spec deviation (flagged by PAL):** The original design spec said "patch-centered Hough." The implementation ran full-image. These are fundamentally different: full-image accumulates votes from all edges in a 1024×1024 image; patch-based limits vote scope to the local region. Patch-based Hough remains untested.
+
+**Raw results (param2 sweep, 2349 GT bubbles r≥8px, 14 images):**
+```
+param2   DR_matched   DR_in_tol(≤2lv)   mean_FP/img
+    10        0.802             0.114          2429.6
+    20        0.732             0.097          1569.1
+    30        0.568             0.093           771.1
+
+Level offset (param2=10, sign-corrected*): mean=+7.63, median=+8.31
+  → r_det ≈ 2.2× r_gt (Hough detects circles far too large)
+  within ±2 levels: 14.2%  ±3 levels: 19.7%
+
+*Script has sign bug: log(r)/log(sf) flips sign vs. correct formula log(r)/log(1/sf).
+```
+
+**FALSIFIED.** DR_in_tol = 11% vs 70% target (4.9× below); FP/image = 771–2430 vs 5 target (154–486× above). Both failures are unambiguous and robust across all param2 values.
+
+**Critical analysis (reviewed with PAL, consensus reached):**
+
+1. **Scope: full-image Hough is falsified, not Hough as a method.** The radius bias (+7.6 levels, r_det ≈ 2.2×r_gt) and catastrophic FP both originate from the full-image accumulator collecting votes from all image texture at arbitrary distances. This is an accumulator noise problem, not a morphological incompatibility. GaussianBlur(5,5) σ≈1.1px cannot produce 7.6-level radius inflation (it would shift radius by ≈0.7 levels for a 30px bubble). Patch-based Hough would not have this pathology and remains an open question.
+
+2. **DR_matched=80% is inflated.** The match logic is non-injective: one Hough detection can "match" multiple GT bubbles. When det/GT=373× (img019655), proximity matches succeed by random chance. DR_in_tol=11% is the honest figure, and is also slightly inflated by the same mechanism.
+
+3. **Brightness/FP correlation is real but noisy.** Dark images (mean<0.2) generally have more FP; bright images have fewer. But IMG_005070 (mean=0.242) has FP=1193 and IMG_000001 (mean=0.351, 58 GT bubbles) fires **zero detections at all param2 values** — unexplained. Per-image contrast stretch + fixed Canny threshold produces highly variable Canny edge density across the 4 photometric regimes.
+
+4. **FP criterion slightly underreports.** `count_fp` uses all GT bubbles (including r<8px) as FP absorbers. True operational FP (against r≥8px bubbles only) is higher. This makes the verdict stronger.
+
+**Path forward: E13 — radial gradient SNR (patch-centered, tests rim edge signal directly)**
+
+---
+
+## Open Experiments (pending)
+
+### E13 · Radial gradient SNR at the bubble rim (patch-centered discriminability test)
+
+**Motivation:** Full-image Hough (E12) is falsified by accumulator noise, not proven to be morphologically incompatible. Before concluding handcrafted features are exhausted, test whether the dark-rim edge (54% prevalence) produces a detectable inward-pointing gradient signal at the bubble boundary independent of any detector architecture.
+
+**Hypothesis to falsify:** "The inward radial gradient at the bubble rim annulus (r = 0.85–1.15 × bubble.radius) is not significantly larger than the same metric at random background locations of the same radius. SNR < 2× → dark-rim edge provides no useful discriminative signal beyond what background gradient noise provides."
+
+**What this tests:** Not a complete detector — a pure signal diagnostic. If the rim gradient SNR is high, then any future detector (CNN, learned Hough, radial symmetry transform) that exploits gradient edges has a real signal to work with. If it is low, the dataset's 4 photometric regimes have erased the gradient contrast needed for any edge-based detector.
 
 **Design:**
-- For each GT bubble (r≥8px), run OpenCV `HoughCircles` (or manual Hough accumulator) on a patch centered at the bubble. Record the peak accumulator radius vs. GT radius.
-- Convert radius error to pyramid-level offset using the pyramid scale formula.
-- Background: count Hough detections in random patches > 3R from any GT bubble.
-- Stratify results by morphology class (dark-rim vs. filled-dark) — Hough should work best for dark-rim and worst for filled-dark.
-- Failure criterion: if ≥30% of GT bubbles have radius error > 2 levels OR background FP rate > 5 per image, Hough is falsified and morphology-conditioned detectors must be evaluated.
+- For each GT bubble (r≥8px): extract a patch of radius 2×bubble.radius centered at the GT bubble center.
+- Compute image gradient (Sobel or Scharr) in the patch.
+- Compute the **inward radial gradient score**: for each pixel in the rim annulus (r/R ∈ [0.85, 1.15]), take the dot product of the gradient vector with the inward unit radial vector (pointing toward the bubble center). Sum and normalize by annulus pixel count. This is positive for dark-rim (inward gradient at the dark ring boundary) and near-zero for flat regions.
+- Background: compute the same score on random patches centered at locations >3R from any GT bubble, at the same R value (synthetic rim).
+- Measure SNR (bubble mean / background mean) stratified by: size bin (small/medium/large), photometric regime (img_mean quartiles), morphology type (dark-rim vs. filled-dark from E11 Step 1).
+
+**Falsification criteria:**
+1. SNR < 2× across all strata → gradient edge signal insufficient; handcrafted features exhausted; proceed to CNN evaluation.
+2. SNR ≥ 2× in at least the dark-rim stratum (54% of population) → gradient edge is viable; design a radial gradient-based scoring function for the full pipeline.
+3. SNR ≥ 2× in dark-rim AND filled-dark → gradient edge is broadly viable; handcrafted-feature pipeline remains feasible.
+
+**If E13 passes:** implement a full gradient-based scoring pipeline using the inward radial gradient as the feature, calibrated like the existing NCC pipeline.  
+**If E13 fails:** the accumulated evidence (E1–E13) spanning NCC, LoG, and edge-based approaches across 12 distinct experimental conditions constitutes a strong case for learned features (CNN). Document and decide with PAL.
+
+Script: `scripts/experiments/profile_radgrad_e13.py` (to be written).
