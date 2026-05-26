@@ -195,6 +195,234 @@ def main():
         flag = " <-- over" if ns > g * 10 and ns > 20 else ""
         print(f"   {i:>5}  {er:>6.1f}  {ns:>10}  {g:>10}{flag}")
 
+    # ------------------------------------------------------------------ #
+    # 6. EXPERIMENT 1 — raw LMs vs NMS survivors at the correct level
+    #
+    # Falsifies which mechanism drives under-prediction:
+    #   Mech A (NMS eviction):        correct-level LM exists in raw score map
+    #                                 but is absent from nms_3d() survivors.
+    #   Mech B (labeling inversion):  correct-level peak survives NMS but wrong-
+    #                                 level survivors arrive first in score order
+    #                                 and consume the GT annotation slot.
+    #
+    # Decision rule:
+    #   raw_hits >> nms_hits  →  Mech A dominates  (NMS is evicting real peaks)
+    #   raw_hits ≈ nms_hits   →  correct-level peaks absent even before NMS
+    #                            → template / NCC quality is the root limit
+    # ------------------------------------------------------------------ #
+    print("\n" + "=" * 65)
+    print("6. EXPERIMENT 1 — raw LMs vs NMS survivors at correct level")
+    print("=" * 65)
+
+    min_d = _lm_min_dist(cfg)
+    eff_radii_arr = np.array([er for er, _ in ncc_r])
+    canonical_r = cfg.template_size / (2.0 * cfg.template_context_factor)
+
+    raw_hits = 0      # GT bubbles with a correct-level raw LM within bubble.radius
+    nms_hits = 0      # GT bubbles with a correct-level NMS survivor within bubble.radius
+    raw_only = 0      # correct-level raw LM exists but NMS suppressed it
+    neither  = 0      # no correct-level peak at all (even in raw score map)
+
+    per_level_raw  = {}   # level → count of GT bubbles with correct-level raw hit
+    per_level_nms  = {}
+
+    for b in s.bubbles:
+        best_lv = int(np.argmin(np.abs(eff_radii_arr - b.radius)))
+        eff_r, score_map = ncc_r[best_lv]
+        alpha = cfg.template_size / (2.0 * cfg.template_context_factor * eff_r)
+
+        # raw: any LM in the correct-level score map within bubble.radius
+        peaks = _local_maxima(score_map, min_d)
+        ys = peaks[:, 0] / alpha
+        xs = peaks[:, 1] / alpha
+        dists = np.hypot(ys - b.cy, xs - b.cx)
+        has_raw = bool((dists < b.radius).any())
+
+        # nms: any correct-level NMS survivor within bubble.radius
+        has_nms = any(
+            lv == best_lv and np.hypot(y - b.cy, x - b.cx) < b.radius
+            for _, lv, y, x, _ in survivors
+        )
+
+        if has_raw:
+            raw_hits += 1
+            per_level_raw[best_lv] = per_level_raw.get(best_lv, 0) + 1
+        if has_nms:
+            nms_hits += 1
+            per_level_nms[best_lv] = per_level_nms.get(best_lv, 0) + 1
+
+        if has_raw and not has_nms:
+            raw_only += 1
+        elif not has_raw:
+            neither += 1
+
+    total_b = len(s.bubbles)
+    print(f"\n   GT bubbles: {total_b}")
+    print(f"   Correct-level raw LM within radius:   {raw_hits:4d}  ({raw_hits/total_b:.1%})")
+    print(f"   Correct-level NMS survivor within r:  {nms_hits:4d}  ({nms_hits/total_b:.1%})")
+    print(f"   Raw LM existed but NMS evicted it:    {raw_only:4d}  ({raw_only/total_b:.1%})  ← Mech A signal")
+    print(f"   No correct-level peak at all:         {neither:4d}  ({neither/total_b:.1%})  ← template quality limit")
+
+    if raw_hits > 0:
+        eviction_rate = raw_only / raw_hits
+        print(f"\n   NMS eviction rate (of raw hits): {eviction_rate:.1%}")
+        if eviction_rate > 0.5:
+            print("   → Mechanism A (NMS eviction) is the PRIMARY offender")
+        else:
+            print("   → Mechanism A is minor; template/NCC quality dominates")
+
+    print(f"\n   Per-level breakdown  (levels with GT bubbles only):")
+    print(f"   {'Level':>5}  {'eff_r':>6}  {'gt':>5}  {'raw_hits':>9}  {'nms_hits':>9}  {'evicted':>8}")
+    for i, (er, g) in enumerate(zip(radii, gt)):
+        if g == 0:
+            continue
+        rh = per_level_raw.get(i, 0)
+        nh = per_level_nms.get(i, 0)
+        ev = rh - nh
+        print(f"   {i:>5}  {er:>6.1f}  {g:>5}  {rh:>9}  {nh:>9}  {ev:>8}")
+
+    # ------------------------------------------------------------------ #
+    # 7. EXPERIMENT 2 — scale normalization falsification
+    #
+    # Hypothesis: multiplying NCC scores by (eff_r / canonical_r)^alpha
+    # before cross-scale NMS would allow the correct-level peak to outscore
+    # wrong-level competitors, fixing NMS eviction without retraining.
+    #
+    # alpha=0  → no normalization (current state)
+    # alpha>0  → fine-scale responses penalised relative to coarse-scale
+    #
+    # For each GT bubble that has a correct-level raw LM:
+    #   1. Record its best correct-level raw LM score.
+    #   2. Find the highest-scoring raw LM within bubble.radius at each
+    #      competing level in the IoU suppression zone (levels where
+    #      IoU > nms_iou_threshold with the correct level).
+    #   3. Apply normalisation to all scores and check whether the
+    #      correct-level normalised score beats every competitor.
+    #
+    # Decision rule:
+    #   rescue_rate >> 0  →  normalisation would fix NMS ordering for many
+    #                        GT bubbles  →  hypothesis survives, worth implementing
+    #   rescue_rate ≈ 0   →  correct-scale NCC response is intrinsically weaker
+    #                        even proportionally  →  normalisation is not the fix
+    # ------------------------------------------------------------------ #
+    print("\n" + "=" * 65)
+    print("7. EXPERIMENT 2 — scale normalisation falsification")
+    print("=" * 65)
+
+    # Build IoU suppression zone for each level.
+    # IoU of two centered squares with half-sides r_i, r_j:
+    #   IoU = (min(r_i, r_j) / max(r_i, r_j))^2
+    # Suppressed when IoU > threshold.
+    iou_thr = cfg.nms_iou_threshold
+    footprints = eff_radii_arr * cfg.template_context_factor   # half-side of NMS box
+    suppression_zone: list[list[int]] = []
+    for i in range(len(eff_radii_arr)):
+        zone = []
+        for j in range(len(eff_radii_arr)):
+            if i == j:
+                continue
+            ratio = min(footprints[i], footprints[j]) / max(footprints[i], footprints[j])
+            if ratio ** 2 > iou_thr:
+                zone.append(j)
+        suppression_zone.append(zone)
+
+    alphas = [0.0, 0.5, 1.0, 2.0]
+    # rescued[alpha] = GT bubbles where normalised correct-level score > all zone competitors
+    rescued      = {a: 0 for a in alphas}
+    has_competitor = 0   # GT bubbles with a correct-level raw LM AND at least one competitor
+
+    # Pre-cache raw LMs and scores per level (avoids recomputing for each bubble)
+    level_peaks_cache: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    for lv, (er, sm) in enumerate(ncc_r):
+        alp = cfg.template_size / (2.0 * cfg.template_context_factor * er)
+        pks = _local_maxima(sm, min_d)
+        if len(pks):
+            sc  = sm[pks[:, 0], pks[:, 1]]
+            ys_ = pks[:, 0] / alp
+            xs_ = pks[:, 1] / alp
+        else:
+            sc  = np.array([])
+            ys_ = np.array([])
+            xs_ = np.array([])
+        level_peaks_cache.append((ys_, xs_, sc))
+
+    for b in s.bubbles:
+        best_lv = int(np.argmin(np.abs(eff_radii_arr - b.radius)))
+        ys_, xs_, sc_ = level_peaks_cache[best_lv]
+        if len(sc_) == 0:
+            continue
+        dists_ = np.hypot(ys_ - b.cy, xs_ - b.cx)
+        in_r = dists_ < b.radius
+        if not in_r.any():
+            continue
+        correct_score = float(sc_[in_r].max())
+
+        # Find best competing score in each suppression-zone level
+        competitor_scores: list[float] = []
+        for comp_lv in suppression_zone[best_lv]:
+            yc, xc, scc = level_peaks_cache[comp_lv]
+            if len(scc) == 0:
+                continue
+            dc = np.hypot(yc - b.cy, xc - b.cx)
+            in_rc = dc < b.radius
+            if in_rc.any():
+                competitor_scores.append(float(scc[in_rc].max()))
+
+        if not competitor_scores:
+            continue
+        has_competitor += 1
+        max_comp = max(competitor_scores)
+
+        for a in alphas:
+            norm_correct = correct_score * (eff_radii_arr[best_lv] / canonical_r) ** a
+            norm_comp    = max_comp      * (eff_radii_arr[
+                # competitor level with max_comp score — approximate: use all competitors
+                # re-evaluate per-alpha by normalising each competitor individually
+                0] / canonical_r) ** a   # placeholder; recomputed below
+            # Re-evaluate properly: normalise each competitor at its own level
+            best_norm_comp = -np.inf
+            for comp_lv in suppression_zone[best_lv]:
+                yc, xc, scc = level_peaks_cache[comp_lv]
+                if len(scc) == 0:
+                    continue
+                dc = np.hypot(yc - b.cy, xc - b.cx)
+                in_rc = dc < b.radius
+                if not in_rc.any():
+                    continue
+                raw_comp = float(scc[in_rc].max())
+                norm_c = raw_comp * (eff_radii_arr[comp_lv] / canonical_r) ** a
+                if norm_c > best_norm_comp:
+                    best_norm_comp = norm_c
+            if best_norm_comp == -np.inf:
+                continue
+            norm_correct = correct_score * (eff_radii_arr[best_lv] / canonical_r) ** a
+            if norm_correct > best_norm_comp:
+                rescued[a] += 1
+
+    print(f"\n   GT bubbles with correct-level raw LM AND zone competitor: {has_competitor}")
+    print(f"\n   {'alpha':>6}  {'normalisation':>20}  {'rescued':>8}  {'rescue_rate':>12}  verdict")
+    for a in alphas:
+        rate = rescued[a] / max(has_competitor, 1)
+        norm_label = {0.0: "none (current)", 0.5: "sqrt(eff_r/r0)",
+                      1.0: "linear (eff_r/r0)", 2.0: "squared (eff_r/r0)²"}.get(a, f"^{a}")
+        verdict = ("would fix most"   if rate > 0.7 else
+                   "partial fix"      if rate > 0.3 else
+                   "not sufficient")
+        print(f"   {a:>6.1f}  {norm_label:>20}  {rescued[a]:>8}  {rate:>11.1%}  {verdict}")
+
+    print(f"\n   Interpretation:")
+    best_a = max(alphas, key=lambda a: rescued[a])
+    best_rate = rescued[best_a] / max(has_competitor, 1)
+    if best_rate > 0.7:
+        print(f"   → Scale normalisation (alpha={best_a}) rescues {best_rate:.0%} of evicted GT bubbles.")
+        print(f"     Hypothesis survives: worth implementing score *= (eff_r/canonical_r)^alpha before NMS.")
+    elif best_rate > 0.3:
+        print(f"   → Scale normalisation gives partial improvement (best alpha={best_a}, {best_rate:.0%} rescued).")
+        print(f"     Correct-scale NCC responses are somewhat weaker; normalisation alone may not suffice.")
+    else:
+        print(f"   → Scale normalisation does not rescue GT bubbles (best {best_rate:.0%}).")
+        print(f"     The correct-scale NCC response is intrinsically weaker; normalisation is not the fix.")
+
 
 if __name__ == "__main__":
     main()
