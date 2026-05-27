@@ -1,19 +1,15 @@
-# Bubble Pipeline — Approaches Tried
+# Bubble detection summary
 
-A concise reference for every major approach attempted, why it was tried, and the decisive finding that ruled it in or out. For full experimental detail (raw numbers, scripts, PAL consensus notes) see `docs/experiments.md`.
+This is concise reference for every major approach attempted, why it was tried, and the decisive finding that ruled it in or out. 
 
-This document covers **two sequential attempts** at the same scientific goal:
+This document covers two sequential attempts in segmenting (detecting) bubble size distribution in bubbly flows:
 
-- **Attempt 1** (`Github/Bubble-tracking`, Jan–Mar 2026): Instance segmentation / detection framing. Goal was per-bubble instance masks; evaluation metric was AP@IoU. Abandoned when the KPI was clarified as relL1 on the size histogram, which instance segmentation cannot directly optimize.
+- **Attempt 1** (`Github/Bubble-tracking`, Jan–Mar 2026): Instance segmentation / detection framing. Goal was per-bubble instance masks; evaluation metric was AP@IoU. 
 - **Attempt 2** (`Github/template-matching`, Mar 2026–present): Histogram estimation framing. Directly targets relL1. Approaches 1–12 below all belong to this attempt.
 
 ---
 
 ## Attempt 1 — Instance Segmentation (Github/Bubble-tracking)
-
-### Context
-
-A research intern set up a full training pipeline (Jan–Mar 2026) targeting per-bubble instance segmentation on the same ZeroG FlightDay dataset. The pipeline ran on the Oscar HPC cluster (Brown CCV, project `dharri15`), managed via `manage_bubbly.py` with config-driven Slurm submission. Annotated data: same 14 full-frame images (1024×1024 uint16 PNG), labeled as instance-ID masks. Training outputs were saved to `~/scratch/bubble-models/trained/` (not retained locally).
 
 ### Literature Review
 
@@ -31,7 +27,7 @@ Nine papers (2016–2025) were surveyed, all covering CNN/classical bubble detec
 | Nizovtseva et al. 2024 | CV + DL survey for multiphase flows | Multi-method comparison | Background reference |
 | Hessenkemper et al. 2024 | 3D tracking of deformable bubble swarms | Deformable tracking pipeline | Out of scope (requires calibrated stereo setup) |
 
-**Critical cross-cutting finding:** All high-AP results (AP@0.5 ≥ 0.91) are on Earth-gravity air-water data where buoyancy deforms bubbles into oblate shapes with characteristic cap boundaries. Microgravity bubbles (surface-tension dominant) are more spherical and have qualitatively different boundary contrast patterns. Published accuracy numbers are not transferable.
+All high-AP results (AP@0.5 ≥ 0.91) are on Earth-gravity air-water data where buoyancy deforms bubbles into oblate shapes with characteristic cap boundaries. Microgravity bubbles (surface-tension dominant) are more spherical and have qualitatively different boundary contrast patterns. Published accuracy numbers are not transferable.
 
 ### Models Attempted
 
