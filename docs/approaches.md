@@ -2,7 +2,7 @@
 
 A record of every approach tried to estimate the bubble size distribution from our bubbly flow images: what the method does, why we thought it would work, and what ended the effort. Written for a reader familiar with fluid experiments but not image processing.
 
-Two attempts are covered. The first (Jan–Mar 2026) tried to find and outline each bubble individually. The second (Mar 2026–present) tries to estimate the size histogram without per-bubble detection. Approaches 1–12 below all belong to the second.
+Two attempts are covered. The first (Jan–Mar 2026) tried to find and outline each bubble individually ([Bubble-tracking repo](https://github.com/elvis-aguero/Bubble-tracking)). The second (Mar 2026–present) tries to estimate the size histogram without per-bubble detection ([template-matching repo](https://github.com/elvis-aguero/bubble-template-matching)). Approaches 1–12 below all belong to the second.
 
 ---
 
@@ -17,9 +17,9 @@ We reviewed nine papers (2016–2025).
 | Paper | Method | Result |
 |---|---|---|
 | Fu & Liu 2016 | Classical edge geometry | Void fraction accurate to 18% gas |
-| Kim & Park 2021 | Neural network (Mask R-CNN) | 98% detection in held-out tests |
+| [Kim & Park 2021 (BubMask)](https://github.com/ywflow/BubMask) | Neural network (Mask R-CNN) | 98% detection in held-out tests |
 | Cerqueira & Paladino 2021 | Neural net + ellipse fitting | Transfer across different fluids |
-| Hessenkemper et al. 2022 | StarDist (lab-trained weights) | 91% detection |
+| [Hessenkemper et al. 2022](https://github.com/stardist/stardist) | StarDist (lab-trained weights) | 91% detection |
 | Cui et al. 2022 | Feature-pyramid detection network | Robust to 20% gas content |
 | Yang et al. 2025 | YOLO-based detector | Fast, multi-scale |
 | Maduabuchi 2024 | U-Net for boiling surfaces | Uncertainty quantification |
@@ -30,11 +30,11 @@ Every paper reporting over 90% detection accuracy used Earth-gravity experiments
 
 ### What we ran
 
-We fine-tuned MicroSAM (based on Meta's Segment Anything Model) on 14 annotated frames from our dataset. It takes an image and outputs a pixel outline around each bubble; radius comes from outline area via r = √(area/π).
+We fine-tuned [MicroSAM](https://github.com/computational-cell-analytics/micro-sam) (based on Meta's [Segment Anything Model](https://github.com/facebookresearch/segment-anything)) on 14 annotated frames from our dataset. It takes an image and outputs a pixel outline around each bubble; radius comes from outline area via r = √(area/π).
 
-We also ran a non-learned method: the Fast Radial Symmetry Transform (FRST) votes for image locations with circular symmetry at a range of radii, proposing candidate centers, and then SAM draws outlines around each. No training required.
+We also ran a non-learned method: the [Fast Radial Symmetry Transform](https://link.springer.com/chapter/10.1007/3-540-47969-4_24) (FRST) votes for image locations with circular symmetry at a range of radii, proposing candidate centers, and then SAM draws outlines around each. No training required.
 
-Two more methods, StarDist and Mask R-CNN, were set up but not fully evaluated before the pivot.
+Two more methods, [StarDist](https://github.com/stardist/stardist) and [Mask R-CNN](https://github.com/facebookresearch/detectron2), were set up but not fully evaluated before the pivot.
 
 ### Why we stopped
 
@@ -101,7 +101,7 @@ The monotone scale response is a property of cross-correlation in textured image
 
 ---
 
-### 2 · Laplacian-of-Gaussian blob filter
+### 2 · [Laplacian-of-Gaussian](https://en.wikipedia.org/wiki/Blob_detection#The_Laplacian_of_Gaussian) blob filter
 
 A Laplacian-of-Gaussian (LoG) filter is theoretically the right tool for circular blobs. For an ideal filled dark circle against a bright background, the filter response peaks exactly at the circle's radius. Unlike template matching, this peak is a real property of the filter's mathematics, not an artifact of image texture.
 
@@ -111,7 +111,7 @@ One useful result: though LoG cannot estimate bubble size, it locates bubble cen
 
 ---
 
-### 3 · Hough circle transform
+### 3 · [Hough circle transform](https://en.wikipedia.org/wiki/Circle_Hough_Transform)
 
 Every edge pixel votes for every circle it could lie on, across all possible radii and center locations. Peaks in the three-dimensional (x, y, radius) vote space are circle candidates. Hough is explicitly designed for arbitrary radii and uses gradient direction rather than intensity, so it is less sensitive to bubble appearance type than LoG or template matching.
 
@@ -143,7 +143,7 @@ Tighter spatial precision makes the gradient measurement more reliable but reduc
 
 ---
 
-### 6 · Fast Radial Symmetry Transform (FRST)
+### 6 · [Fast Radial Symmetry Transform](https://link.springer.com/chapter/10.1007/3-540-47969-4_24) (FRST)
 
 FRST is a filter where each gradient pixel votes for radial symmetry centers at a specific distance in the gradient direction. It was developed for scale-selective radial symmetry detection in microscopy and has published results in bubble and cell detection at moderate densities.
 
@@ -151,7 +151,7 @@ In our images, the dense bubble field defeats it the same way it defeats Hough. 
 
 ---
 
-### 7 · Background subtraction + watershed
+### 7 · Background subtraction + [watershed segmentation](https://en.wikipedia.org/wiki/Watershed_(image_processing))
 
 The first 20 frames of each recording contain no bubbles. Averaging them gives a clean per-pixel background model. Subtracting it from each subsequent frame should isolate bubble signal, since the static vessel structure cancels exactly. We then applied watershed segmentation, which treats the image as a terrain, floods from local intensity minima, and assigns each basin to one object.
 
@@ -179,7 +179,7 @@ The scale-specific gradient features, despite the genuine 6.86× physical signal
 
 ### 10 · Density map networks (rejected without running)
 
-Density map regression, used in crowd counting and cell density estimation, predicts a spatial heat map of bubble presence for each size bin, then integrates to get per-bin counts. This bypasses bubble boundaries entirely, which looked attractive after the detection failures.
+[Density map regression](https://github.com/leeyeehoo/CSRNet-pytorch), used in crowd counting and cell density estimation, predicts a spatial heat map of bubble presence for each size bin, then integrates to get per-bin counts. This bypasses bubble boundaries entirely, which looked attractive after the detection failures.
 
 We rejected it. With 14 images spanning four photometric regimes, any network must generalize across regimes in the same way the regression in §9 must, and §9 already showed no image-level features predict the histogram. The network must also assign each bubble to the correct size channel from appearance alone, which is the scale-discrimination problem that closed template matching and LoG. The estimated probability of reaching relL1 ≤ 0.20 at n=14 is ~2–4%.
 
@@ -187,7 +187,7 @@ We rejected it. With 14 images spanning four photometric regimes, any network mu
 
 ### 11 · Contrast-invariant boundary detection (not run)
 
-Phase congruency (Kovesi 1999) measures whether image structure is coherent across spatial frequencies, independently of whether a boundary is bright-to-dark or dark-to-bright. It was considered as a preprocessing step to address the four-appearance-type problem.
+[Phase congruency](https://www.peterkovesi.com/matlabfns/) (Kovesi 1999) measures whether image structure is coherent across spatial frequencies, independently of whether a boundary is bright-to-dark or dark-to-bright. It was considered as a preprocessing step to address the four-appearance-type problem.
 
 By the time it was assessed, §5 had already shown that better boundary detection does not help: any global vote accumulator inherits the cross-bubble contamination of §3 and §6, and any patch classifier still runs into the 52.7% recall ceiling from §5. Better boundary detection does not change the geometry of touching bubbles.
 
@@ -205,7 +205,7 @@ All handcrafted and regression approaches are closed. The remaining options requ
 
 | Approach | P(relL1 ≤ 0.20) | Notes |
 |---|---|---|
-| Exemplar-conditioned counting (FamNet / DAVE) | 5–10% | Conditions on crops from the test image itself; sidesteps cross-image generalization |
+| Exemplar-conditioned counting ([FamNet](https://github.com/cvlab-stonybrook/LearningToCountEverything) / [DAVE](https://github.com/jerpelhan/DAVE)) | 5–10% | Conditions on crops from the test image itself; sidesteps cross-image generalization |
 | Detection network with pretrained backbone (FPN + FCOS) | 3–6% at n=14 | Data is the bottleneck, not architecture |
 | Collecting ≥20 more annotated images | Raises CNN success to ~20–30% | Binding constraint for all CNN paths |
 
