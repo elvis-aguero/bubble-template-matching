@@ -35,6 +35,8 @@ plt.rcParams["font.serif"] = ["Times New Roman", "DejaVu Serif"]
 plt.rcParams["font.size"] = 12
 plt.rcParams["axes.titlesize"] = 13
 plt.rcParams["axes.labelsize"] = 12
+plt.rcParams["pdf.fonttype"] = 42  # embed as editable TrueType, not Type 3 bitmaps
+plt.rcParams["svg.fonttype"] = "none"
 
 CANNY_HIGH = 50
 DP = 1
@@ -189,31 +191,42 @@ def main():
     hybrid_all = np.concatenate([r["hybrid_diam"] for r in rows])
     ours_total_per_bin = np.stack([r["ours_counts"] for r in rows]).sum(axis=0)
 
-    fig, ax = plt.subplots(figsize=(9.5, 6))
     bins = np.linspace(0, args.heatmap_max_diam, 30)
-    ax.hist(gt_all, bins=bins, color="black", histtype="step", linewidth=2.5,
-            label=f"Ground truth ({len(gt_all)} bubbles, 14 images)")
-    ax.hist(hough_all, bins=bins, color="tomato", alpha=0.35,
-            label=f"Hough ({len(hough_all)})")
-    ax.hist(oscar_all, bins=bins, color="mediumseagreen", alpha=0.35,
-            label=f"Oscar deterministic ({len(oscar_all)})")
-    ax.hist(hybrid_all, bins=bins, color="darkorchid", alpha=0.35,
-            label=f"Oscar FRST+SAM3 hybrid ({len(hybrid_all)})")
-    ax2 = ax.twinx()
-    ax2.bar(ours_bin_diam_px, ours_total_per_bin,
-            width=np.diff(ours_bin_diam_px).mean() if len(ours_bin_diam_px) > 1 else 1.0,
-            color="steelblue", alpha=0.35, label="Ours (expected count, LOSO)")
-    ax.set_xlabel("Bubble Diameter (px)")
-    ax.set_ylabel("Count (GT, Hough, Oscar, hybrid)")
-    ax2.set_ylabel("Expected count (ours)")
-    ax.set_xlim(0, args.heatmap_max_diam)
-    ax.set_title("Overall Bubble Size Distribution — all 14 seed_v04 images (real GT)")
-    l1, lb1 = ax.get_legend_handles_labels()
-    l2, lb2 = ax2.get_legend_handles_labels()
-    ax.legend(l1 + l2, lb1 + lb2, fontsize=8.5)
-    ax.grid(True, alpha=0.3)
+    gt_label = f"Ground truth (manual annotation, {len(gt_all)} bubbles)"
+    panels2 = [
+        (hough_all, "tomato", f"Hough transform (collaborator's baseline, {len(hough_all)})"),
+        (oscar_all, "mediumseagreen",
+         f"Classical detector (adaptive threshold + contour, Oscar HPC, {len(oscar_all)})"),
+        (hybrid_all, "darkorchid",
+         f"FRST + SAM3 hybrid (state-of-the-art, Oscar HPC, {len(hybrid_all)})"),
+    ]
+
+    fig, axes = plt.subplots(4, 1, figsize=(12, 9), sharex=True)
+    for ax, (data, color, label) in zip(axes[:3], panels2):
+        ax.hist(gt_all, bins=bins, color="black", histtype="step", linewidth=2, label=gt_label)
+        ax.hist(data, bins=bins, color=color, alpha=0.45, label=label)
+        ax.set_ylabel("Count", fontsize=9)
+        ax.legend(fontsize=7.5, loc="upper right")
+        ax.grid(True, alpha=0.3)
+
+    ax4 = axes[3]
+    ax4.hist(gt_all, bins=bins, color="black", histtype="step", linewidth=2, label=gt_label)
+    ax4b = ax4.twinx()
+    ax4b.bar(ours_bin_diam_px, ours_total_per_bin,
+             width=np.diff(ours_bin_diam_px).mean() if len(ours_bin_diam_px) > 1 else 1.0,
+             color="steelblue", alpha=0.45, label="Template matching (this work, LOSO-trained)")
+    ax4.set_ylabel("Count (GT)", fontsize=9)
+    ax4b.set_ylabel("Expected count\n(template matching)", fontsize=8)
+    l1, lb1 = ax4.get_legend_handles_labels()
+    l2, lb2 = ax4b.get_legend_handles_labels()
+    ax4.legend(l1 + l2, lb1 + lb2, fontsize=7.5, loc="upper right")
+    ax4.grid(True, alpha=0.3)
+    ax4.set_xlabel("Bubble Diameter (px)")
+    ax4.set_xlim(0, args.heatmap_max_diam)
+
+    fig.suptitle("Overall Bubble Size Distribution — all 14 seed_v04 images (real GT)")
     fig.tight_layout()
-    fig.savefig(args.out_dir / "gt_all14_hybrid_fig2.png", dpi=150)
+    fig.savefig(args.out_dir / "gt_all14_hybrid_fig2.pdf", bbox_inches="tight")
     plt.close(fig)
 
     # ========================================================================
@@ -228,20 +241,28 @@ def main():
     ours_counts_tot = [rows[i]["ours_counts"].sum() for i in order]
 
     x = np.arange(len(order))
-    fig, ax = plt.subplots(figsize=(14, 6))
-    ax.semilogy(x, gt_counts, "o-", color="black", label="Ground truth")
-    ax.semilogy(x, hough_counts, "o-", color="tomato", label="Hough")
-    ax.semilogy(x, oscar_counts, "o-", color="mediumseagreen", label="Oscar deterministic")
-    ax.semilogy(x, hybrid_counts, "o-", color="darkorchid", label="Oscar FRST+SAM3 hybrid")
-    ax.semilogy(x, ours_counts_tot, "o-", color="steelblue", label="Ours (expected, LOSO)")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=60, ha="right", fontsize=9)
-    ax.set_ylabel("Number of Bubbles (log scale)")
-    ax.set_title("Bubble Count per Image, log scale — all 14 seed_v04 images (real GT)")
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3, which="both")
+    gt_label5 = "Ground truth (manual annotation)"
+    panels5 = [
+        (hough_counts, "tomato", "Hough transform (collaborator's baseline)"),
+        (oscar_counts, "mediumseagreen",
+         "Classical detector (adaptive threshold + contour, Oscar HPC)"),
+        (hybrid_counts, "darkorchid", "FRST + SAM3 hybrid (state-of-the-art, Oscar HPC)"),
+        (ours_counts_tot, "steelblue", "Template matching (this work, LOSO-trained)"),
+    ]
+
+    fig, axes = plt.subplots(4, 1, figsize=(12, 9), sharex=True)
+    for ax, (counts, color, label) in zip(axes, panels5):
+        ax.semilogy(x, gt_counts, "o-", color="black", label=gt_label5)
+        ax.semilogy(x, counts, "o-", color=color, label=label)
+        ax.set_ylabel("Count (log)", fontsize=9)
+        ax.legend(fontsize=7.5, loc="upper right")
+        ax.grid(True, alpha=0.3, which="both")
+
+    axes[-1].set_xticks(x)
+    axes[-1].set_xticklabels(labels, rotation=60, ha="right", fontsize=8)
+    fig.suptitle("Bubble Count per Image, log scale — all 14 seed_v04 images (real GT)")
     fig.tight_layout()
-    fig.savefig(args.out_dir / "gt_all14_hybrid_fig5_log.png", dpi=150)
+    fig.savefig(args.out_dir / "gt_all14_hybrid_fig5_log.pdf", bbox_inches="tight")
     plt.close(fig)
 
     # ========================================================================
@@ -270,10 +291,13 @@ def main():
             interp_counts = np.interp(bin_centers, ours_bin_diam_px, counts_k, left=0, right=0)
             ours_mat[:, col] = interp_counts / (total_k * bin_width)
 
-    fig, axes = plt.subplots(1, 5, figsize=(26, 6), sharey=True)
+    fig, axes = plt.subplots(1, 5, figsize=(20, 7), sharey=True)
     for ax, mat, title in zip(axes, [gt_mat, hough_mat, oscar_mat, hybrid_mat, ours_mat],
-                               ["Ground Truth", "Hough", "Oscar deterministic",
-                                "Oscar FRST+SAM3 hybrid", "Ours (LOSO)"]):
+                               ["Ground Truth\n(manual annotation)",
+                                "Hough transform\n(collaborator's baseline)",
+                                "Classical detector\n(adaptive threshold, Oscar HPC)",
+                                "FRST + SAM3 hybrid\n(state-of-the-art, Oscar HPC)",
+                                "Template matching\n(this work, LOSO)"]):
         im = ax.imshow(mat, aspect="auto", origin="lower", cmap="hot",
                         extent=[0, len(order) - 1, 0, args.heatmap_max_diam])
         ax.set_xticks(range(len(order)))
@@ -283,7 +307,7 @@ def main():
     axes[0].set_ylabel("Bubble Diameter (px)")
     fig.suptitle("Bubble Size Distribution — all 14 seed_v04 images (real GT)")
     fig.tight_layout()
-    fig.savefig(args.out_dir / "gt_all14_hybrid_fig6.png", dpi=150)
+    fig.savefig(args.out_dir / "gt_all14_hybrid_fig6.pdf")
     plt.close(fig)
 
     print(f"\nSaved gt_all14_hybrid_fig2/5log/6 to {args.out_dir}/")
